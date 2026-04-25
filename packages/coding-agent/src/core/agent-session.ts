@@ -28,8 +28,10 @@ import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } f
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
+import { setMaxConcurrency } from "./agents/concurrency.js";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
+import { type CheckpointEntry, CheckpointManager } from "./checkpoint/manager.js";
 import {
 	type CompactionResult,
 	calculateContextTokens,
@@ -70,6 +72,21 @@ import {
 } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
+import { createCustomMessage } from "./messages.js";
+import { wrapToolsWithModeGate } from "./mode/tool-mode-gate.js";
+import {
+	DEFAULT_SESSION_MODE,
+	MODE_CHANGE_CUSTOM_TYPE,
+	MODE_CYCLE_ORDER,
+	type ModeChangeData,
+	PLAN_APPROVED_CUSTOM_TYPE,
+	type PlanApprovalRequest,
+	type PlanApprovalResult,
+	type PlanApprovedDetails,
+	type SessionMode,
+	type ToolApprovalRequest,
+	type ToolApprovalResult,
+} from "./mode/types.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
@@ -80,8 +97,13 @@ import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
+import { BASH_SPAWN_TOOL_NAME, createBashSpawnToolDefinition } from "./tools/bash-spawn.js";
+import { createExitPlanModeToolDefinition, EXIT_PLAN_MODE_TOOL_NAME } from "./tools/exit-plan-mode.js";
 import { createAllToolDefinitions } from "./tools/index.js";
-import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+import { createTaskToolDefinition, TASK_TOOL_NAME } from "./tools/task.js";
+import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.js";
+import { createWebFetchToolDefinition, WEB_FETCH_TOOL_NAME } from "./tools/web-fetch.js";
+import { UsageTotals, type UsageTotalsSnapshot } from "./usage-totals.js";
 
 // ============================================================================
 // Skill Block Parsing
@@ -128,7 +150,20 @@ export type AgentSessionEvent =
 			errorMessage?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
+	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| { type: "mode_change"; mode: SessionMode; previous: SessionMode }
+	| {
+			type: "tool_approval_request";
+			request: ToolApprovalRequest;
+			/** Host MUST call exactly once. Awaiting tool execution depends on it. */
+			resolve: (result: ToolApprovalResult) => void;
+	  }
+	| {
+			type: "plan_approval_request";
+			request: PlanApprovalRequest;
+			/** Host MUST call exactly once. */
+			resolve: (result: PlanApprovalResult) => void;
+	  };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -283,6 +318,10 @@ export class AgentSession {
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
+	private _disallowedToolNames: Set<string> = new Set();
+	private _askToolNames: Set<string> = new Set();
+	/** Runtime toggle for the agent-team workflow (canSpawn). Default: true. */
+	private _teamsEnabled = true;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -304,6 +343,13 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 
+	// Input mode (normal / auto-edits / plan)
+	private _mode: SessionMode = DEFAULT_SESSION_MODE;
+	/** Tool names allow-listed for the rest of this session by an "allow always" approval. */
+	private _modeAllowedTools: Set<string> = new Set();
+	/** Active tools at the moment plan mode was entered, restored on exit. */
+	private _activeToolsBeforePlan: string[] | undefined;
+
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
@@ -316,6 +362,8 @@ export class AgentSession {
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
+		this._loadPermissionsFromSettings();
+		this._applyTaskSettings();
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
@@ -324,10 +372,174 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 
+		// Restore the session mode from persisted entries before tool registry is built
+		// so plan mode comes back correctly on reopen / fork / clone.
+		this._mode = this._readPersistedMode();
+
+		// Build cumulative usage totals from existing session entries so resumed
+		// sessions show the correct footer numbers without an O(N) scan per frame.
+		this._usageTotals.rebuildFrom(this.sessionManager);
+
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+	}
+
+	/**
+	 * Apply settings-based permissions on top of any CLI-provided allowlist.
+	 *
+	 * - `permissions.allowedTools`: merges with `_allowedToolNames` (intersect).
+	 * - `permissions.disallowedTools`: filtered out at registry time.
+	 * - `permissions.askTools`: forces approval prompts via the mode gate.
+	 */
+	/** Apply `settings.task.{maxConcurrency,teamsEnabled}` to runtime state. */
+	private _applyTaskSettings(): void {
+		const taskSettings = this.settingsManager.getSettings()?.task;
+		const max = taskSettings?.maxConcurrency;
+		if (typeof max === "number" && max > 0) {
+			setMaxConcurrency(max);
+		}
+		// Default: teams enabled. Only an explicit `false` in settings flips it off.
+		if (taskSettings && taskSettings.teamsEnabled === false) {
+			this._teamsEnabled = false;
+		} else {
+			this._teamsEnabled = true;
+		}
+	}
+
+	/** Whether agent-team orchestration (canSpawn) is currently enabled. */
+	getTeamsEnabled(): boolean {
+		return this._teamsEnabled;
+	}
+
+	/** Lazy-create the per-session checkpoint manager. */
+	private _getCheckpointManager(): CheckpointManager {
+		if (!this._checkpointManager) {
+			const sessionId = this.sessionManager.getHeader()?.id ?? "no-session";
+			this._checkpointManager = new CheckpointManager(this._cwd, sessionId);
+		}
+		return this._checkpointManager;
+	}
+
+	/**
+	 * Best-effort auto-checkpoint before mutating tool calls. Snapshots only
+	 * the file(s) the tool will touch — never the whole tree, never via git.
+	 *
+	 * Coverage: edit + write. Bash is intentionally NOT snapshotted because
+	 * we can't predict which files a shell command will mutate; silently
+	 * pretending to cover bash would be worse than being honest.
+	 */
+	private async _maybeCheckpointForTool(toolName: string, args: unknown): Promise<void> {
+		if (toolName !== "edit" && toolName !== "write") return;
+		const paths = extractFilePathsFromToolArgs(args);
+		if (paths.length === 0) return;
+		try {
+			const summary = summarizeToolForCheckpoint(toolName, args);
+			await this._getCheckpointManager().create(summary, paths);
+		} catch {
+			// Never let checkpoint failures break the tool call.
+		}
+	}
+
+	/** Read-only access to the session's checkpoint list (for `/checkpoints`). */
+	listCheckpoints(): ReadonlyArray<CheckpointEntry> {
+		return this._getCheckpointManager().list();
+	}
+
+	/** Restore the most recent or named checkpoint. Used by `/undo`. */
+	async undoCheckpoint(targetId?: string): Promise<{ ok: boolean; message: string }> {
+		return this._getCheckpointManager().undo(targetId);
+	}
+
+	/**
+	 * Per-prompt cost-budget enforcement. Called after each assistant message
+	 * settles. Soft-warns at 80% of budget, hard-aborts above 100%.
+	 *
+	 * The hard-abort calls `agent.abort()` which interrupts before the next
+	 * provider call; the in-flight assistant turn is allowed to complete so
+	 * the user gets a final partial response and the cost figures are correct.
+	 */
+	private _enforceBudgetIfExceeded(): void {
+		const budget = this.settingsManager.getSettings()?.task?.budgetUsd;
+		if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
+			return;
+		}
+		if (this._promptStartTotals === undefined) {
+			return;
+		}
+		const now = this._usageTotals.snapshot();
+		const spent = now.cost - this._promptStartTotals.cost;
+		const ratio = spent / budget;
+
+		if (ratio >= 1 && !this._budgetExceededFired) {
+			this._budgetExceededFired = true;
+			this._emit({
+				type: "auto_retry_end",
+				success: false,
+				attempt: 0,
+				finalError: `Cost budget exceeded: spent $${spent.toFixed(4)} of $${budget.toFixed(4)} limit. Aborting prompt. Adjust settings.task.budgetUsd or unset it to remove the cap.`,
+			});
+			this.agent.abort();
+			return;
+		}
+
+		if (ratio >= 0.8 && !this._budgetWarnedAt80) {
+			this._budgetWarnedAt80 = true;
+			// Surface a one-shot warning via the existing retry-end event channel
+			// (which the TUI already renders as a transient status line). This is
+			// a soft warning — it does NOT abort.
+			this._emit({
+				type: "auto_retry_end",
+				success: true,
+				attempt: 0,
+				finalError: `Cost budget at ${(ratio * 100).toFixed(0)}%: $${spent.toFixed(4)} of $${budget.toFixed(4)}. Will abort if exceeded.`,
+			});
+		}
+	}
+
+	/**
+	 * Toggle the team workflow at runtime. When false, `canSpawn: true` agents
+	 * lose access to the Task tool — they can still run as ordinary specialists,
+	 * but they can't dispatch other subagents.
+	 */
+	setTeamsEnabled(enabled: boolean): void {
+		this._teamsEnabled = enabled;
+	}
+
+	private _loadPermissionsFromSettings(): void {
+		const perms = this.settingsManager.getSettings()?.permissions;
+		if (!perms) return;
+		if (perms.allowedTools && perms.allowedTools.length > 0) {
+			const settingsAllow = new Set(perms.allowedTools);
+			if (this._allowedToolNames) {
+				// Intersect CLI flag with settings.
+				this._allowedToolNames = new Set([...this._allowedToolNames].filter((name) => settingsAllow.has(name)));
+			} else {
+				this._allowedToolNames = settingsAllow;
+			}
+		}
+		if (perms.disallowedTools) {
+			for (const name of perms.disallowedTools) this._disallowedToolNames.add(name);
+		}
+		if (perms.askTools) {
+			for (const name of perms.askTools) this._askToolNames.add(name);
+		}
+	}
+
+	/** Scan persisted session entries for the latest mode_change marker. */
+	private _readPersistedMode(): SessionMode {
+		const entries = this.sessionManager.getEntries();
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry.type === "custom" && entry.customType === MODE_CHANGE_CUSTOM_TYPE) {
+				const data = entry.data as ModeChangeData | undefined;
+				if (data && (data.mode === "normal" || data.mode === "auto-edits" || data.mode === "plan")) {
+					return data.mode;
+				}
+			}
+		}
+		return DEFAULT_SESSION_MODE;
 	}
 
 	/** Model registry for API key resolution and model discovery */
@@ -371,6 +583,11 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			// Auto-checkpoint before any state-mutating tool runs (edit, write,
+			// bash). Snapshots the working tree so `/undo` can restore it. Best-
+			// effort — failures don't block the tool.
+			await this._maybeCheckpointForTool(toolCall.name, args);
+
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
@@ -442,6 +659,20 @@ export class AgentSession {
 
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
+
+	// Cumulative usage totals, kept in sync with the session entries so that
+	// the footer and the live working indicator can read them in O(1).
+	private readonly _usageTotals: UsageTotals = new UsageTotals();
+
+	// Per-prompt timing + token snapshots for the `agent_stop` hook.
+	private _promptStartedAt: number | undefined = undefined;
+	private _promptStartTotals: UsageTotalsSnapshot | undefined = undefined;
+	// Per-prompt budget bookkeeping. `_budgetWarnedAt80` is reset at agent_start
+	// so the soft warning fires at most once per prompt.
+	private _budgetWarnedAt80 = false;
+	private _budgetExceededFired = false;
+	// Lazy-initialised on first use so agent-session.ts construction stays fast.
+	private _checkpointManager: CheckpointManager | undefined;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = (event: AgentEvent): void => {
@@ -544,6 +775,12 @@ export class AgentSession {
 			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
 				this._lastAssistantMessage = event.message;
+				// Incrementally bump cumulative usage totals so the footer and the
+				// live working indicator can read them in O(1) per render frame.
+				this._usageTotals.addAssistantMessage(event.message);
+				// Per-prompt cost budget: short-circuit the loop before the next
+				// provider call when the user's budget is exceeded.
+				this._enforceBudgetIfExceeded();
 
 				const assistantMsg = event.message as AssistantMessage;
 				if (assistantMsg.stopReason !== "error") {
@@ -613,8 +850,45 @@ export class AgentSession {
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
+			this._promptStartedAt = Date.now();
+			this._promptStartTotals = this._usageTotals.snapshot();
+			this._budgetWarnedAt80 = false;
+			this._budgetExceededFired = false;
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
+			// Fire `agent_stop` once per prompt, just before `agent_end`. Compute
+			// per-prompt duration + token deltas from the snapshots taken at start.
+			if (this._promptStartedAt !== undefined) {
+				const startTotals = this._promptStartTotals ?? {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					cost: 0,
+				};
+				const now = this._usageTotals.snapshot();
+				const last = this._lastAssistantMessage;
+				const reason: "complete" | "user_interrupt" | "error" = (() => {
+					if (last?.stopReason === "aborted") return "user_interrupt";
+					if (last?.stopReason === "error") return "error";
+					return "complete";
+				})();
+				await this._extensionRunner.emit({
+					type: "agent_stop",
+					reason,
+					finalAssistantMessage: last,
+					durationMs: Date.now() - this._promptStartedAt,
+					tokens: {
+						input: now.input - startTotals.input,
+						output: now.output - startTotals.output,
+						cacheRead: now.cacheRead - startTotals.cacheRead,
+						cacheWrite: now.cacheWrite - startTotals.cacheWrite,
+						cost: now.cost - startTotals.cost,
+					},
+				});
+				this._promptStartedAt = undefined;
+				this._promptStartTotals = undefined;
+			}
 			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
@@ -788,6 +1062,115 @@ export class AgentSession {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
+	/** O(1) snapshot of cumulative usage totals. Footer + working indicator read this. */
+	getUsageTotals(): UsageTotalsSnapshot {
+		return this._usageTotals.snapshot();
+	}
+
+	// =========================================================================
+	// Input mode (normal / auto-edits / plan)
+	// =========================================================================
+
+	/** Current input mode. */
+	getMode(): SessionMode {
+		return this._mode;
+	}
+
+	/**
+	 * Set the input mode. Persists a marker entry, swaps the active tool set
+	 * if entering or leaving plan mode, and emits a `mode_change` event.
+	 */
+	setMode(mode: SessionMode): void {
+		this._setMode(mode);
+	}
+
+	/** Cycle: normal -> auto-edits -> plan -> normal. Returns the new mode. */
+	cycleMode(): SessionMode {
+		const idx = MODE_CYCLE_ORDER.indexOf(this._mode);
+		const next = MODE_CYCLE_ORDER[(idx + 1) % MODE_CYCLE_ORDER.length];
+		this._setMode(next);
+		return next;
+	}
+
+	private _setMode(mode: SessionMode): void {
+		const previous = this._mode;
+		if (previous === mode) {
+			return;
+		}
+		this._mode = mode;
+
+		const enteringPlan = previous !== "plan" && mode === "plan";
+		const leavingPlan = previous === "plan" && mode !== "plan";
+
+		if (enteringPlan) {
+			this._activeToolsBeforePlan = this.getActiveToolNames();
+		}
+
+		// Reset session-scoped allowlist when leaving auto-edits, since the gate is
+		// only meaningful in auto-edits today.
+		if (previous === "auto-edits" && mode !== "auto-edits") {
+			this._modeAllowedTools.clear();
+		}
+
+		// Refresh registry so ExitPlanMode is registered in plan mode and removed otherwise.
+		this._refreshToolRegistry({
+			activeToolNames: enteringPlan
+				? this._planModeActiveTools()
+				: leavingPlan
+					? (this._activeToolsBeforePlan ?? this._defaultActiveToolNames())
+					: this.getActiveToolNames(),
+		});
+
+		// Persist as a custom entry (does not show in chat, used to restore mode on reopen).
+		const data: ModeChangeData = { mode };
+		this.sessionManager.appendCustomEntry(MODE_CHANGE_CUSTOM_TYPE, data);
+
+		this._emit({ type: "mode_change", mode, previous });
+	}
+
+	/** Tools active in plan mode: read-only set + ExitPlanMode. */
+	private _planModeActiveTools(): string[] {
+		// Anything in the registry that is read-only by name + ExitPlanMode
+		const readOnly = ["read", "grep", "find", "ls"].filter((n) => this._toolRegistry.has(n));
+		readOnly.push(EXIT_PLAN_MODE_TOOL_NAME);
+		return readOnly;
+	}
+
+	private _defaultActiveToolNames(): string[] {
+		return this._baseToolsOverride ? Object.keys(this._baseToolsOverride) : ["read", "bash", "edit", "write"];
+	}
+
+	/**
+	 * Build the tool list a subagent (Task tool child) should see.
+	 *
+	 * Defaults to a read-only set if the agent definition didn't specify one.
+	 * Filtered against the parent's `disallowedTools` so a child can never use
+	 * a tool the parent isn't allowed to use.
+	 *
+	 * The Task tool is propagated only when the agent definition has
+	 * `canSpawn: true` (used by the `tech-lead` orchestrator). Recursion is
+	 * exactly one level deep — the children of a `canSpawn` agent do NOT
+	 * receive the Task tool.
+	 */
+	private _resolveChildTools(allowlist: string[] | undefined, canSpawn: boolean = false): AgentTool[] {
+		const wanted = new Set(allowlist ?? ["read", "grep", "find", "ls"]);
+		// Teams toggle: even agents declared with `canSpawn: true` lose Task
+		// access when `_teamsEnabled` is false. This kills the orchestration
+		// pattern but leaves individual subagents fully functional.
+		if (canSpawn && this._teamsEnabled) {
+			wanted.add(TASK_TOOL_NAME);
+		} else {
+			wanted.delete(TASK_TOOL_NAME);
+		}
+		const tools: AgentTool[] = [];
+		for (const [name, definition] of this._baseToolDefinitions) {
+			if (!wanted.has(name)) continue;
+			if (this._disallowedToolNames.has(name)) continue;
+			tools.push(wrapToolDefinition(definition));
+		}
+		return tools;
+	}
+
 	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
@@ -804,11 +1187,48 @@ export class AgentSession {
 				validToolNames.push(name);
 			}
 		}
-		this.agent.state.tools = tools;
+		this.agent.state.tools = wrapToolsWithModeGate(tools, this._modeGateContext());
 
 		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
+	/** Build the gate context lazily; reads `_mode` at execute() time so changes are live. */
+	private _modeGateContext() {
+		return {
+			getMode: (): SessionMode => this._mode,
+			requestApproval: (request: ToolApprovalRequest): Promise<ToolApprovalResult> =>
+				new Promise<ToolApprovalResult>((resolve) => {
+					this._emit({ type: "tool_approval_request", request, resolve });
+				}),
+			requestPlanApproval: (request: PlanApprovalRequest): Promise<PlanApprovalResult> =>
+				new Promise<PlanApprovalResult>((resolve) => {
+					this._emit({ type: "plan_approval_request", request, resolve });
+				}),
+			onPlanApproved: (plan: string, nextMode: Exclude<SessionMode, "plan">): void => {
+				this._persistPlanApproved(plan, nextMode);
+				this._setMode(nextMode);
+			},
+			rememberAllow: (toolName: string): void => {
+				this._modeAllowedTools.add(toolName);
+			},
+			isAllowed: (toolName: string): boolean => this._modeAllowedTools.has(toolName),
+			getAskTools: (): ReadonlySet<string> => this._askToolNames,
+		};
+	}
+
+	private _persistPlanApproved(plan: string, nextMode: Exclude<SessionMode, "plan">): void {
+		const approvedAt = new Date().toISOString();
+		const details: PlanApprovedDetails = { approvedAt, nextMode };
+		const content = `Plan approved by user (mode switched to "${nextMode}"). You may now proceed with the plan:\n\n${plan}`;
+		// Persist to disk so reopen reconstructs it.
+		this.sessionManager.appendCustomMessageEntry(PLAN_APPROVED_CUSTOM_TYPE, content, true, details);
+		// Also push into the live transcript so the very next turn (without a reload)
+		// sees the approval and the plan as user-side context.
+		this.agent.state.messages.push(
+			createCustomMessage(PLAN_APPROVED_CUSTOM_TYPE, content, true, details, approvedAt),
+		);
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -911,6 +1331,7 @@ export class AgentSession {
 			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
+		const memory = this._resourceLoader.getMemoryFiles();
 
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
@@ -921,6 +1342,9 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
+			memoryFiles: memory.memoryFiles.map((m) => ({ path: m.path, name: m.name, content: m.content })),
+			memoryToc: memory.toc,
+			mode: this._mode,
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}
@@ -2227,7 +2651,77 @@ export class AgentSession {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
 		const allowedToolNames = this._allowedToolNames;
-		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
+		const disallowed = this._disallowedToolNames;
+		const isAllowedTool = (name: string): boolean => {
+			if (allowedToolNames && !allowedToolNames.has(name)) return false;
+			if (disallowed.has(name)) return false;
+			return true;
+		};
+
+		// Keep ExitPlanMode in/out of the base tool registry based on current mode,
+		// so that callers entering/leaving plan mode see the registry update without
+		// rebuilding the whole runtime.
+		if (this._mode === "plan") {
+			if (!this._baseToolDefinitions.has(EXIT_PLAN_MODE_TOOL_NAME)) {
+				this._baseToolDefinitions.set(
+					EXIT_PLAN_MODE_TOOL_NAME,
+					createExitPlanModeToolDefinition() as ToolDefinition,
+				);
+			}
+		} else {
+			this._baseToolDefinitions.delete(EXIT_PLAN_MODE_TOOL_NAME);
+		}
+
+		// Subagent `Task` tool: registered only when at least one agent definition
+		// is loaded from `~/.pi/agents/*.md` or `<cwd>/.pi/agents/*.md`. Keeps the
+		// tool list clean for users who haven't opted in.
+		if (this._resourceLoader.getAgentRegistry().list().length > 0) {
+			if (!this._baseToolDefinitions.has(TASK_TOOL_NAME)) {
+				this._baseToolDefinitions.set(
+					TASK_TOOL_NAME,
+					createTaskToolDefinition({
+						getRegistry: () => this._resourceLoader.getAgentRegistry(),
+						getModelRegistry: () => this._modelRegistry,
+						getCurrentModel: () => this.agent.state.model,
+						resolveTools: (allowlist, canSpawn) => this._resolveChildTools(allowlist, canSpawn),
+					}) as ToolDefinition,
+				);
+			}
+		} else {
+			this._baseToolDefinitions.delete(TASK_TOOL_NAME);
+		}
+
+		// WebFetch — registered as a built-in so any agent can read URLs. The
+		// tool itself enforces SSRF protection, content-type whitelist, and
+		// size/time caps; the user controls per-domain allowlists via
+		// `settings.tools.webFetch.allowedDomains`.
+		if (!this._baseToolDefinitions.has(WEB_FETCH_TOOL_NAME)) {
+			const webSettings = this.settingsManager.getSettings()?.tools?.webFetch;
+			this._baseToolDefinitions.set(
+				WEB_FETCH_TOOL_NAME,
+				createWebFetchToolDefinition({
+					allowedDomains: webSettings?.allowedDomains,
+					maxBytes: webSettings?.maxBytes,
+					timeoutMs: webSettings?.timeoutMs,
+					denyPrivateNetworks: true,
+				}) as ToolDefinition,
+			);
+		}
+
+		// BashSpawn — background shell. Uses the same shell + prefix as the
+		// regular `bash` tool, so it inherits whatever sandbox the user has
+		// configured.
+		if (!this._baseToolDefinitions.has(BASH_SPAWN_TOOL_NAME)) {
+			const shellPath = this.settingsManager.getShellPath();
+			const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
+			this._baseToolDefinitions.set(
+				BASH_SPAWN_TOOL_NAME,
+				createBashSpawnToolDefinition(this._cwd, {
+					shellPath,
+					shellCommandPrefix,
+				}) as ToolDefinition,
+			);
+		}
 
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
@@ -2338,6 +2832,12 @@ export class AgentSession {
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
 
+		// Register ExitPlanMode in the base definitions only while the session is in plan mode.
+		// _refreshToolRegistry then naturally exposes it. Leaving plan mode rebuilds without it.
+		if (this._mode === "plan") {
+			this._baseToolDefinitions.set(EXIT_PLAN_MODE_TOOL_NAME, createExitPlanModeToolDefinition() as ToolDefinition);
+		}
+
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
 			for (const [name, value] of options.flagValues) {
@@ -2358,14 +2858,25 @@ export class AgentSession {
 		this._bindExtensionCore(this._extensionRunner);
 		this._applyExtensionBindings(this._extensionRunner);
 
-		const defaultActiveToolNames = this._baseToolsOverride
-			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+		const defaultActiveToolNames =
+			this._mode === "plan"
+				? this._planModeActiveToolNamesFromBase()
+				: this._baseToolsOverride
+					? Object.keys(this._baseToolsOverride)
+					: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
-			includeAllExtensionTools: options.includeAllExtensionTools,
+			// In plan mode we want a strict tool set; do NOT auto-include all extension tools.
+			includeAllExtensionTools: this._mode === "plan" ? false : options.includeAllExtensionTools,
 		});
+	}
+
+	/** Helper used at runtime-build time before the registry has been populated. */
+	private _planModeActiveToolNamesFromBase(): string[] {
+		const readOnly = ["read", "grep", "find", "ls"].filter((n) => this._baseToolDefinitions.has(n));
+		readOnly.push(EXIT_PLAN_MODE_TOOL_NAME);
+		return readOnly;
 	}
 
 	async reload(): Promise<void> {
@@ -3086,4 +3597,33 @@ export class AgentSession {
 	get extensionRunner(): ExtensionRunner {
 		return this._extensionRunner;
 	}
+}
+
+/** One-line summary of a tool call for the checkpoint label. */
+function summarizeToolForCheckpoint(toolName: string, args: unknown): string {
+	if (!args || typeof args !== "object") return toolName;
+	const obj = args as Record<string, unknown>;
+	const candidates = [obj.path, obj.file_path, obj.command];
+	for (const candidate of candidates) {
+		if (typeof candidate === "string" && candidate.trim().length > 0) {
+			const value = candidate.trim();
+			const trimmed = value.length > 60 ? `${value.slice(0, 57)}...` : value;
+			return `${toolName} ${trimmed}`;
+		}
+	}
+	return toolName;
+}
+
+/** Extract file paths a tool call is about to mutate. Returns absolute or relative paths as given. */
+function extractFilePathsFromToolArgs(args: unknown): string[] {
+	if (!args || typeof args !== "object") return [];
+	const obj = args as Record<string, unknown>;
+	const candidates = [obj.path, obj.file_path];
+	const out: string[] = [];
+	for (const candidate of candidates) {
+		if (typeof candidate === "string" && candidate.trim().length > 0) {
+			out.push(candidate.trim());
+		}
+	}
+	return out;
 }

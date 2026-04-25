@@ -105,6 +105,77 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	permissions?: PermissionsSettings;
+	memory?: MemorySettings;
+	task?: TaskSettings;
+	tools?: ToolsSettingsSubsection;
+}
+
+/** Per-tool configuration. */
+export interface ToolsSettingsSubsection {
+	webFetch?: WebFetchSettings;
+}
+
+/** WebFetch tool configuration. */
+export interface WebFetchSettings {
+	/**
+	 * Domain allowlist (suffix-match including subdomains). When set, only
+	 * URLs whose host is or ends with one of these are fetched. Default: empty
+	 * (all public hosts allowed; private/loopback/link-local always blocked).
+	 */
+	allowedDomains?: string[];
+	/** Max body size in bytes. Default 1 MiB. */
+	maxBytes?: number;
+	/** Total timeout in ms. Default 30000. */
+	timeoutMs?: number;
+}
+
+/** Subagent / Task tool settings. */
+export interface TaskSettings {
+	/**
+	 * Max concurrent in-flight `Task` dispatches process-wide. Above this cap,
+	 * additional Task calls queue silently until a slot frees. Default: 4.
+	 */
+	maxConcurrency?: number;
+	/**
+	 * Whether agents with `canSpawn: true` (e.g., the `tech-lead` orchestrator)
+	 * are allowed to dispatch other subagents. When false, the team workflow is
+	 * disabled — individual `Task` calls still work but no recursion. Default: true.
+	 */
+	teamsEnabled?: boolean;
+	/**
+	 * Per-prompt cost budget in USD. When the agent's cumulative spend on a
+	 * single user prompt exceeds this value, pi aborts the loop with a clear
+	 * "budget exceeded" message before issuing the next provider call. A soft
+	 * warning is shown at 80%. Default: unset (no budget enforcement).
+	 *
+	 * Useful when handing autonomous work to a `tech-lead` team — caps the
+	 * blast radius of a runaway loop.
+	 */
+	budgetUsd?: number;
+}
+
+/** Persistent memory settings (`~/.pi/memory/*.md` and `.pi/memory/*.md`). */
+export interface MemorySettings {
+	/** Per-file byte cap. Files larger than this are truncated with a warning. */
+	maxBytes?: number;
+}
+
+/**
+ * Declarative tool permissions. Applied alongside session modes (plan / auto-edits)
+ * and the CLI `--tools` flag. Either tool name (e.g., `"bash"`) or extension-registered
+ * name is accepted.
+ *
+ * Resolution order:
+ *   1. `allowedTools` (whitelist) — if set, only these tool names are exposed.
+ *   2. `disallowedTools` (blacklist) — applied after allowedTools.
+ *   3. `askTools` — listed tools always require approval, even in `normal` mode.
+ *   4. Session mode (plan / auto-edits) — overrides where stricter.
+ */
+export interface PermissionsSettings {
+	allowedTools?: string[];
+	disallowedTools?: string[];
+	askTools?: string[];
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -393,6 +464,11 @@ export class SettingsManager {
 
 	getProjectSettings(): Settings {
 		return structuredClone(this.projectSettings);
+	}
+
+	/** Merged effective settings (global ∪ project; project wins). */
+	getSettings(): Settings {
+		return structuredClone(this.settings);
 	}
 
 	async reload(): Promise<void> {
@@ -730,7 +806,9 @@ export class SettingsManager {
 	}
 
 	getHideThinkingBlock(): boolean {
-		return this.settings.hideThinkingBlock ?? false;
+		// Default to hidden — keeps the chat clean during edits/coding.
+		// Toggle live with Ctrl+T (`app.thinking.toggle`).
+		return this.settings.hideThinkingBlock ?? true;
 	}
 
 	setHideThinkingBlock(hide: boolean): void {

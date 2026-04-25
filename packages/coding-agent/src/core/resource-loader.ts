@@ -9,9 +9,12 @@ import type { ResourceDiagnostic } from "./diagnostics.js";
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.js";
 
 import { isLocalPath } from "../utils/paths.js";
+import { loadAgentRegistry } from "./agents/registry.js";
+import type { AgentRegistry } from "./agents/types.js";
 import { createEventBus, type EventBus } from "./event-bus.js";
 import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.js";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.js";
+import { loadMemoryFiles, loadMemoryToc, type MemoryFile } from "./memory/loader.js";
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.js";
 import type { PromptTemplate } from "./prompt-templates.js";
 import { loadPromptTemplates } from "./prompt-templates.js";
@@ -32,6 +35,8 @@ export interface ResourceLoader {
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
+	getMemoryFiles(): { memoryFiles: MemoryFile[]; toc: string | undefined };
+	getAgentRegistry(): AgentRegistry;
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
 	extendResources(paths: ResourceExtensionPaths): void;
@@ -128,6 +133,7 @@ export interface DefaultResourceLoaderOptions {
 	noPromptTemplates?: boolean;
 	noThemes?: boolean;
 	noContextFiles?: boolean;
+	noMemory?: boolean;
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
 	extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
@@ -195,6 +201,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private themes: Theme[];
 	private themeDiagnostics: ResourceDiagnostic[];
 	private agentsFiles: Array<{ path: string; content: string }>;
+	private memoryFiles: MemoryFile[];
+	private memoryToc: string | undefined;
+	private noMemory: boolean = false;
+	private agentRegistry: AgentRegistry = loadAgentRegistry();
 	private systemPrompt?: string;
 	private appendSystemPrompt: string[];
 	private lastSkillPaths: string[];
@@ -242,6 +252,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.themes = [];
 		this.themeDiagnostics = [];
 		this.agentsFiles = [];
+		this.memoryFiles = [];
+		this.memoryToc = undefined;
+		this.noMemory = options.noMemory ?? false;
 		this.appendSystemPrompt = [];
 		this.lastSkillPaths = [];
 		this.extensionSkillSourceInfos = new Map();
@@ -269,6 +282,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> } {
 		return { agentsFiles: this.agentsFiles };
+	}
+
+	getMemoryFiles(): { memoryFiles: MemoryFile[]; toc: string | undefined } {
+		return { memoryFiles: this.memoryFiles, toc: this.memoryToc };
+	}
+
+	getAgentRegistry(): AgentRegistry {
+		return this.agentRegistry;
 	}
 
 	getSystemPrompt(): string | undefined {
@@ -457,6 +478,28 @@ export class DefaultResourceLoader implements ResourceLoader {
 		};
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
 		this.agentsFiles = resolvedAgentsFiles.agentsFiles;
+
+		// Memory: load ~/.pi/memory and <cwd>/.pi/memory unless --no-memory is set.
+		if (this.noMemory) {
+			this.memoryFiles = [];
+			this.memoryToc = undefined;
+		} else {
+			const globalMemoryDir = join(this.agentDir, "memory");
+			const projectMemoryDir = join(this.cwd, CONFIG_DIR_NAME, "memory");
+			const maxBytes = this.settingsManager.getSettings()?.memory?.maxBytes;
+			this.memoryFiles = loadMemoryFiles({
+				globalDir: globalMemoryDir,
+				projectDir: projectMemoryDir,
+				maxBytes,
+			});
+			this.memoryToc = loadMemoryToc({ globalDir: globalMemoryDir, projectDir: projectMemoryDir });
+		}
+
+		// Subagent registry: ~/.pi/agents/*.md (user) + <cwd>/.pi/agents/*.md (project).
+		this.agentRegistry = loadAgentRegistry({
+			globalDir: join(this.agentDir, "agents"),
+			projectDir: join(this.cwd, CONFIG_DIR_NAME, "agents"),
+		});
 
 		const baseSystemPrompt = resolvePromptInput(
 			this.systemPromptSource ?? this.discoverSystemPromptFile(),

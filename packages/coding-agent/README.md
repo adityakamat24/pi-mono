@@ -181,6 +181,8 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
+| `/plan` | Enter plan mode (read-only research, then approve a plan) |
+| `/mode <name>` | Set input mode: `normal` (default, no prompts) \| `auto-edits` (prompt for bash) \| `plan` (read-only) |
 
 ### Keyboard Shortcuts
 
@@ -197,8 +199,21 @@ See `/hotkeys` for the full list. Customize via `~/.pi/agent/keybindings.json`. 
 | Ctrl+L | Open model selector |
 | Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
 | Shift+Tab | Cycle thinking level |
+| Alt+M | Cycle input mode (normal / auto-edits / plan) |
 | Ctrl+O | Collapse/expand tool output |
 | Ctrl+T | Collapse/expand thinking blocks |
+
+### Input Modes
+
+Three input modes mirror Claude Code's plan/auto-accept-edits/normal flow. Cycle with `Alt+M` or set explicitly with `/mode <name>` or `/plan`. The current mode is shown as a coloured banner in the footer.
+
+| Mode | Active tools | Approval prompts |
+|------|--------------|------------------|
+| `normal` (default) | All tools | None — auto-run |
+| `auto-edits` | All tools | Prompts before each `bash` call; edits auto-run |
+| `plan` | Read-only set (`read`, `grep`, `find`, `ls`) plus `ExitPlanMode` | The agent must call `ExitPlanMode` with a markdown plan; the user approves and the session switches to the chosen non-plan mode |
+
+Mode persists across `/fork`, `/clone`, and reopen via a `mode_change` entry in the session.
 
 ### Message Queue
 
@@ -322,6 +337,59 @@ Use this skill when the user asks about X.
 ```
 
 Place in `~/.pi/agent/skills/`, `~/.agents/skills/`, `.pi/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [pi package](#pi-packages) to share with others. See [docs/skills.md](docs/skills.md).
+
+### Subagents & Teams
+
+Subagents are focused specialists pi can dispatch to via the `Task` tool. Each one is a markdown file with YAML frontmatter at `~/.pi/agent/agents/<name>.md` (user-scope) or `<cwd>/.pi/agents/<name>.md` (project-scope; project shadows user).
+
+```markdown
+---
+name: code-reviewer
+description: Reviews code for bugs, correctness, security, maintainability.
+tools: [read, grep, find, ls]
+model: deepseek-v4-flash      # optional: override the parent's model
+thinking: low                 # optional: thinking level
+canSpawn: false               # optional: grants access to the `Task` tool itself
+---
+
+You are a senior code reviewer. {prompt body — child's system prompt}
+```
+
+Run `/agents` to see what's loaded. The model invokes a subagent via `Task(agent: "code-reviewer", prompt: "review src/foo.ts")`. The block renders live with a nested sub-rail:
+
+```
+▎ ◉ Task code-reviewer  "review src/foo.ts"
+▎ ▏ ● read  src/foo.ts          (203ms)
+▎ ▏ ● grep  callers              (15ms)
+▎ ▏ π Working… 4.2s · ↑1.2k ↓0.3k $0.012
+▎
+▎ ## Review of src/foo.ts
+▎ ### Critical
+▎ - foo.ts:42 — null deref when ...
+```
+
+**Default behavior**: subagents are read-only (`read`, `grep`, `find`, `ls`) unless their `tools:` field opts into more. They cannot dispatch other subagents — recursion is one level deep.
+
+**Lead-orchestrator pattern (agent teams)**: an agent with `canSpawn: true` gets the `Task` tool itself, so it can coordinate other specialists. The pre-built `tech-lead` orchestrates a full dev workflow:
+
+```
+user → tech-lead
+        ├─ Task explorer  (research the area)
+        ├─ Task refactor-planner  (design the change)
+        ├─ Task implementer  (apply edits + verify)
+        └─ Task code-reviewer  (validate the result)
+```
+
+The team's children all share the parent's process: same model registry, same auth, same `~/.pi/agent/memory/` files, and a shared file-read cache so the implementer's reads of files the explorer already touched are served from cache.
+
+**Cost patterns**:
+
+- Set `model: deepseek-v4-flash` (or another cheap model) on research/exploration agents — explorer, code-reviewer, doc-writer rarely need a strong model.
+- Keep the strong model on the lead and the implementer where synthesis quality matters.
+- The shared read cache (process-singleton) makes hand-offs between team members essentially free.
+- Set `settings.task.maxConcurrency` (default 4) to cap parallel dispatches and avoid rate-limit storms.
+
+Pre-built subagents are documented in [docs/subagents.md](docs/subagents.md). The 11 that ship today: `tech-lead`, `implementer`, `explorer`, `code-reviewer`, `debugger`, `test-writer`, `refactor-planner`, `security-auditor`, `perf-analyzer`, `doc-writer`, `commit-message-writer`.
 
 ### Extensions
 

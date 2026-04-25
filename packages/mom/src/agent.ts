@@ -456,6 +456,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getMemoryFiles: () => ({ memoryFiles: [], toc: undefined }),
+		getAgentRegistry: () => ({ lookup: () => undefined, list: () => [], all: () => [] }),
 		getSystemPrompt: () => systemPrompt,
 		getAppendSystemPrompt: () => [],
 		extendResources: () => {},

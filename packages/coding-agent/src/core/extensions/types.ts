@@ -17,6 +17,7 @@ import type {
 } from "@mariozechner/pi-agent-core";
 import type {
 	Api,
+	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
@@ -642,6 +643,26 @@ export interface AgentEndEvent {
 	messages: AgentMessage[];
 }
 
+/**
+ * Fired exactly once per `prompt()` call, after all tool execution settles
+ * and just before `agent_end`. The closest analog to Claude Code's `Stop`
+ * hook — extensions use it for desktop notifications, "task done" sounds,
+ * or to log the per-prompt cost.
+ */
+export interface AgentStopEvent {
+	type: "agent_stop";
+	reason: "complete" | "user_interrupt" | "error";
+	finalAssistantMessage: AssistantMessage | undefined;
+	durationMs: number;
+	tokens: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		cost: number;
+	};
+}
+
 /** Fired at the start of each turn */
 export interface TurnStartEvent {
 	type: "turn_start";
@@ -947,6 +968,7 @@ export type ExtensionEvent =
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
+	| AgentStopEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -1095,6 +1117,7 @@ export interface ExtensionAPI {
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
+	on(event: "agent_stop", handler: ExtensionHandler<AgentStopEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;

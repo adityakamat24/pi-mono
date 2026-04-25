@@ -101,6 +101,20 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		unsubscribe?.();
 		unsubscribe = session.subscribe((event) => {
+			// Auto-resolve approval prompts in non-interactive runs.
+			// - Tool approvals: always deny (the user is not present to approve).
+			// - Plan approvals: approve and switch to "normal" so plan-mode runs complete.
+			if (event.type === "tool_approval_request") {
+				event.resolve({
+					outcome: "deny",
+					reason: "Tool approval requested in non-interactive print mode; auto-denied.",
+				});
+				return;
+			}
+			if (event.type === "plan_approval_request") {
+				event.resolve({ outcome: "approve", nextMode: "normal" });
+				return;
+			}
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(event)}\n`);
 			}

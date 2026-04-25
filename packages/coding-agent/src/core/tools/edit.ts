@@ -19,6 +19,7 @@ import {
 } from "./edit-diff.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToCwd } from "./path-utils.js";
+import { getSharedReadCache } from "./read-cache.js";
 import { invalidArgText, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
@@ -380,6 +381,8 @@ export function createEditToolDefinition(
 
 								const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 								await ops.writeFile(absolutePath, finalContent);
+								// Edit landed: drop any cached read result for this path.
+								getSharedReadCache().invalidatePath(absolutePath);
 
 								// Check if aborted after writing.
 								if (aborted) {

@@ -18,6 +18,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { getSharedReadCache } from "./read-cache.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateTail } from "./truncate.js";
@@ -351,6 +352,9 @@ export function createBashToolDefinition(
 					env: spawnContext.env,
 				})
 					.then(({ exitCode }) => {
+						// Bash commands can mutate any file in cwd; conservatively drop
+						// the entire file-read cache so subsequent reads see fresh content.
+						getSharedReadCache().invalidateAll();
 						// Combine the rolling buffer chunks.
 						const fullBuffer = Buffer.concat(chunks);
 						const fullOutput = fullBuffer.toString("utf-8");

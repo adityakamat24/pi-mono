@@ -69,8 +69,15 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.js";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
+import { getSharedJobManager } from "../../core/jobs/manager.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
 import { createCompactionSummaryMessage } from "../../core/messages.js";
+import type {
+	PlanApprovalRequest,
+	PlanApprovalResult,
+	ToolApprovalRequest,
+	ToolApprovalResult,
+} from "../../core/mode/types.js";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.js";
 import { DefaultPackageManager } from "../../core/package-manager.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
@@ -106,11 +113,22 @@ import { keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
 import { ModelSelectorComponent } from "./components/model-selector.js";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.js";
+import { PiHero } from "./components/pi-hero.js";
+import { PlanApprovalDialogComponent } from "./components/plan-approval-dialog.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
 import { SessionSelectorComponent } from "./components/session-selector.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.js";
+import { ToolApprovalDialogComponent } from "./components/tool-approval-dialog.js";
 import { ToolExecutionComponent } from "./components/tool-execution.js";
+import { GLYPHS } from "./theme/glyphs.js";
+import { PI_SPINNER_FRAMES, PI_SPINNER_INTERVAL_MS } from "./theme/spinner.js";
+
+const DEFAULT_PI_SPINNER: LoaderIndicatorOptions = {
+	frames: [...PI_SPINNER_FRAMES],
+	intervalMs: PI_SPINNER_INTERVAL_MS,
+};
+
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
@@ -263,10 +281,17 @@ export class InteractiveMode {
 	private loadingAnimation: Loader | undefined = undefined;
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
-	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
+	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = DEFAULT_PI_SPINNER;
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
+	// Live working indicator: ticks elapsed time and token/cost delta since the
+	// most recent turn started, while the agent is streaming.
+	private workingTimer: NodeJS.Timeout | undefined = undefined;
+	private workingStartedAt: number | undefined = undefined;
+	private workingStartTotals:
+		| { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }
+		| undefined = undefined;
 
 	private lastSigintTime = 0;
 	private lastEscapeTime = 0;
@@ -589,8 +614,6 @@ export class InteractiveMode {
 
 		// Add header with keybindings from config (unless silenced)
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
-			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
-
 			// Build startup instructions using keybinding hint helpers
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 
@@ -602,6 +625,7 @@ export class InteractiveMode {
 				hint("app.suspend", "to suspend"),
 				keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
 				hint("app.thinking.cycle", "to cycle thinking level"),
+				hint("app.mode.cycle", "to cycle input mode"),
 				rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
 				hint("app.model.select", "to select model"),
 				hint("app.tools.expand", "to expand tools"),
@@ -615,30 +639,21 @@ export class InteractiveMode {
 				hint("app.clipboard.pasteImage", "to paste image"),
 				rawKeyHint("drop files", "to attach"),
 			].join("\n");
-			const compactInstructions = [
-				hint("app.interrupt", "interrupt"),
-				rawKeyHint(`${keyText("app.clear")}/${keyText("app.exit")}`, "clear/exit"),
-				rawKeyHint("/", "commands"),
-				rawKeyHint("!", "bash"),
-				hint("app.tools.expand", "more"),
-			].join(theme.fg("muted", " · "));
-			const compactOnboarding = theme.fg(
-				"dim",
-				`Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`,
-			);
-			const onboarding = theme.fg(
-				"dim",
-				`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
-			);
+			const compactHints = [
+				`${theme.fg("dim", GLYPHS.railBar)} ${theme.fg("dim", "Type a message or")} ${theme.fg("accent", "/")}${theme.fg("dim", " for commands")} ${theme.fg("muted", "·")} ${theme.fg("accent", keyText("app.mode.cycle"))} ${theme.fg("dim", "cycles modes")}`,
+				`${theme.fg("dim", GLYPHS.railBar)} ${theme.fg("accent", "/hotkeys")} ${theme.fg("dim", "for the full keymap")} ${theme.fg("muted", "·")} ${theme.fg("accent", keyText("app.tools.expand"))} ${theme.fg("dim", "to expand here")}`,
+			].join("\n");
 			this.builtInHeader = new ExpandableText(
-				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
-				() => `${logo}\n${expandedInstructions}\n\n${onboarding}`,
+				() => compactHints,
+				() => `${theme.fg("dim", "Keymap:")}\n${expandedInstructions}`,
 				this.getStartupExpansionState(),
-				1,
+				0,
 				0,
 			);
 
-			// Setup UI layout
+			// Splash banner + spaced hint lines.
+			this.headerContainer.addChild(new Spacer(1));
+			this.headerContainer.addChild(new PiHero(APP_NAME, this.version));
 			this.headerContainer.addChild(new Spacer(1));
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
@@ -1701,21 +1716,92 @@ export class InteractiveMode {
 	}
 
 	private createWorkingLoader(): Loader {
-		return new Loader(
+		const loader = new Loader(
 			this.ui,
 			(spinner) => theme.fg("accent", spinner),
 			(text) => theme.fg("muted", text),
-			this.getWorkingLoaderMessage(),
+			this.formatLiveWorkingMessage(this.getWorkingLoaderMessage()),
 			this.workingIndicatorOptions,
 		);
+		this.startLiveWorkingTimer();
+		return loader;
 	}
 
 	private stopWorkingLoader(): void {
+		this.stopLiveWorkingTimer();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
 		this.statusContainer.clear();
+	}
+
+	/** Snapshot cumulative token totals (O(1) — reads from the session's running totals). */
+	private currentUsageTotals(): {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		cost: number;
+	} {
+		return this.session.getUsageTotals();
+	}
+
+	private startLiveWorkingTimer(): void {
+		this.stopLiveWorkingTimer();
+		this.workingStartedAt = Date.now();
+		this.workingStartTotals = this.currentUsageTotals();
+		this.workingTimer = setInterval(() => {
+			if (!this.loadingAnimation) {
+				this.stopLiveWorkingTimer();
+				return;
+			}
+			this.loadingAnimation.setMessage(this.formatLiveWorkingMessage(this.getWorkingLoaderMessage()));
+		}, 250);
+	}
+
+	private stopLiveWorkingTimer(): void {
+		if (this.workingTimer) {
+			clearInterval(this.workingTimer);
+			this.workingTimer = undefined;
+		}
+		this.workingStartedAt = undefined;
+		this.workingStartTotals = undefined;
+	}
+
+	/**
+	 * Append live elapsed time and turn-delta token/cost stats to the working
+	 * message so the user can see the agent is making progress and what it's
+	 * costing in real time. Always finishes with the interrupt hint.
+	 */
+	private formatLiveWorkingMessage(base: string): string {
+		const interruptHint = `(${keyText("app.interrupt")} to interrupt)`;
+		if (this.workingStartedAt === undefined) {
+			return `${base} ${interruptHint}`;
+		}
+		const elapsedMs = Date.now() - this.workingStartedAt;
+		const elapsed = elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`;
+
+		const start = this.workingStartTotals ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		const now = this.currentUsageTotals();
+		const dInput = now.input - start.input;
+		const dOutput = now.output - start.output;
+		const dCacheRead = now.cacheRead - start.cacheRead;
+		const dCost = now.cost - start.cost;
+
+		const fmt = (n: number): string => {
+			if (n < 1000) return n.toString();
+			if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+			return `${Math.round(n / 1000)}k`;
+		};
+
+		const parts: string[] = [elapsed];
+		if (dInput) parts.push(`↑${fmt(dInput)}`);
+		if (dOutput) parts.push(`↓${fmt(dOutput)}`);
+		if (dCacheRead) parts.push(`R${fmt(dCacheRead)}`);
+		if (dCost > 0) parts.push(`$${dCost.toFixed(3)}`);
+
+		return `${base} · ${parts.join(" ")} ${interruptHint}`;
 	}
 
 	private setWorkingVisible(visible: boolean): void {
@@ -1835,7 +1921,7 @@ export class InteractiveMode {
 		this.workingVisible = true;
 		this.setWorkingIndicator();
 		if (this.loadingAnimation) {
-			this.loadingAnimation.setMessage(`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`);
+			this.loadingAnimation.setMessage(this.formatLiveWorkingMessage(this.getWorkingLoaderMessage()));
 		}
 		this.setHiddenThinkingLabel();
 	}
@@ -1985,7 +2071,7 @@ export class InteractiveMode {
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
 				if (this.loadingAnimation) {
-					this.loadingAnimation.setMessage(message ?? this.defaultWorkingMessage);
+					this.loadingAnimation.setMessage(this.formatLiveWorkingMessage(message ?? this.defaultWorkingMessage));
 				}
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
@@ -2421,6 +2507,7 @@ export class InteractiveMode {
 		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
 		this.defaultEditor.onAction("app.suspend", () => this.handleCtrlZ());
 		this.defaultEditor.onAction("app.thinking.cycle", () => this.cycleThinkingLevel());
+		this.defaultEditor.onAction("app.mode.cycle", () => this.cycleMode());
 		this.defaultEditor.onAction("app.model.cycleForward", () => this.cycleModel("forward"));
 		this.defaultEditor.onAction("app.model.cycleBackward", () => this.cycleModel("backward"));
 
@@ -2535,6 +2622,65 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/plan") {
+				this.editor.setText("");
+				this.setMode("plan");
+				return;
+			}
+			if (text === "/memory") {
+				this.editor.setText("");
+				this.handleMemoryCommand();
+				return;
+			}
+			if (text === "/agents") {
+				this.editor.setText("");
+				this.handleAgentsCommand();
+				return;
+			}
+			if (text === "/teams" || text.startsWith("/teams ")) {
+				this.editor.setText("");
+				const arg = text === "/teams" ? "" : text.slice(7).trim().toLowerCase();
+				this.handleTeamsCommand(arg);
+				return;
+			}
+			if (text === "/undo" || text.startsWith("/undo ")) {
+				this.editor.setText("");
+				const arg = text === "/undo" ? undefined : text.slice(6).trim() || undefined;
+				await this.handleUndoCommand(arg);
+				return;
+			}
+			if (text === "/checkpoints") {
+				this.editor.setText("");
+				this.handleCheckpointsCommand();
+				return;
+			}
+			if (text === "/jobs") {
+				this.editor.setText("");
+				this.handleJobsCommand();
+				return;
+			}
+			if (text === "/job" || text.startsWith("/job ")) {
+				this.editor.setText("");
+				const arg = text === "/job" ? "" : text.slice(5).trim();
+				this.handleJobCommand(arg);
+				return;
+			}
+			if (text === "/kill" || text.startsWith("/kill ")) {
+				this.editor.setText("");
+				const rest = text === "/kill" ? "" : text.slice(6).trim();
+				await this.handleKillCommand(rest);
+				return;
+			}
+			if (text === "/mode" || text.startsWith("/mode ")) {
+				this.editor.setText("");
+				const arg = text === "/mode" ? "" : text.slice(6).trim();
+				if (!arg) {
+					this.showStatus(`Current mode: ${this.session.getMode()} (usage: /mode normal | auto-edits | plan)`);
+					return;
+				}
+				this.setMode(arg);
+				return;
+			}
 			if (text === "/fork") {
 				this.showUserMessageSelector();
 				this.editor.setText("");
@@ -2596,7 +2742,7 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/quit") {
+			if (text === "/quit" || text === "/exit") {
 				this.editor.setText("");
 				await this.shutdown();
 				return;
@@ -2879,6 +3025,7 @@ export class InteractiveMode {
 					(spinner) => theme.fg("accent", spinner),
 					(text) => theme.fg("muted", text),
 					label,
+					DEFAULT_PI_SPINNER,
 				);
 				this.statusContainer.addChild(this.autoCompactionLoader);
 				this.ui.requestRender();
@@ -2944,6 +3091,7 @@ export class InteractiveMode {
 					(spinner) => theme.fg("warning", spinner),
 					(text) => theme.fg("muted", text),
 					retryMessage(Math.ceil(event.delayMs / 1000)),
+					DEFAULT_PI_SPINNER,
 				);
 				this.retryCountdown = new CountdownTimer(
 					event.delayMs,
@@ -2981,6 +3129,23 @@ export class InteractiveMode {
 					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 				}
 				this.ui.requestRender();
+				break;
+			}
+
+			case "mode_change": {
+				this.footer.invalidate();
+				this.updateEditorBorderColor();
+				this.ui.requestRender();
+				break;
+			}
+
+			case "tool_approval_request": {
+				await this.handleToolApprovalRequest(event.request, event.resolve);
+				break;
+			}
+
+			case "plan_approval_request": {
+				await this.handlePlanApprovalRequest(event.request, event.resolve);
 				break;
 			}
 		}
@@ -3278,6 +3443,7 @@ export class InteractiveMode {
 		for (const signal of signals) {
 			const handler = () => {
 				killTrackedDetachedChildren();
+				getSharedJobManager().killAll();
 				void this.shutdown();
 			};
 			process.on(signal, handler);
@@ -3370,8 +3536,16 @@ export class InteractiveMode {
 	}
 
 	private updateEditorBorderColor(): void {
+		const mode = this.session.getMode();
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
+		} else if (mode === "plan") {
+			// Plan mode: editor border in accent (violet) so the input area
+			// reflects the active mode in addition to the footer banner.
+			this.editor.borderColor = (str: string) => theme.fg("accent", str);
+		} else if (mode === "auto-edits") {
+			// Auto-accept edits: editor border in warning (amber) for at-a-glance state.
+			this.editor.borderColor = (str: string) => theme.fg("warning", str);
 		} else {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
@@ -3388,6 +3562,65 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 			this.showStatus(`Thinking level: ${newLevel}`);
 		}
+	}
+
+	private cycleMode(): void {
+		const next = this.session.cycleMode();
+		this.footer.invalidate();
+		this.updateEditorBorderColor();
+		this.showStatus(`Mode: ${next}`);
+	}
+
+	private setMode(mode: string): void {
+		const trimmed = mode.trim();
+		if (trimmed !== "normal" && trimmed !== "auto-edits" && trimmed !== "plan") {
+			this.showStatus(`Unknown mode "${mode}". Use: normal | auto-edits | plan`);
+			return;
+		}
+		this.session.setMode(trimmed);
+		this.footer.invalidate();
+		this.updateEditorBorderColor();
+		this.showStatus(`Mode: ${trimmed}`);
+	}
+
+	private async handleToolApprovalRequest(
+		request: ToolApprovalRequest,
+		resolve: (result: ToolApprovalResult) => void,
+	): Promise<void> {
+		await new Promise<void>((settle) => {
+			this.showSelector((done) => {
+				let resolved = false;
+				const onResolve = (result: ToolApprovalResult) => {
+					if (resolved) return;
+					resolved = true;
+					resolve(result);
+					done();
+					settle();
+				};
+				const dialog = new ToolApprovalDialogComponent(request, onResolve);
+				return { component: dialog, focus: dialog.getSelectList() };
+			});
+		});
+	}
+
+	private async handlePlanApprovalRequest(
+		request: PlanApprovalRequest,
+		resolve: (result: PlanApprovalResult) => void,
+	): Promise<void> {
+		await new Promise<void>((settle) => {
+			this.showSelector((done) => {
+				let resolved = false;
+				const onResolve = (result: PlanApprovalResult) => {
+					if (resolved) return;
+					resolved = true;
+					resolve(result);
+					done();
+					settle();
+				};
+				const dialog = new PlanApprovalDialogComponent(request, onResolve);
+				return { component: dialog, focus: dialog.getSelectList() };
+			});
+		});
 	}
 
 	private async cycleModel(direction: "forward" | "backward"): Promise<void> {
@@ -4230,6 +4463,7 @@ export class InteractiveMode {
 							(spinner) => theme.fg("accent", spinner),
 							(text) => theme.fg("muted", text),
 							`Summarizing branch... (${keyText("app.interrupt")} to cancel)`,
+							DEFAULT_PI_SPINNER,
 						);
 						this.statusContainer.addChild(summaryLoader);
 						this.ui.requestRender();
@@ -5045,6 +5279,176 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	private handleJobsCommand(): void {
+		const jobs = getSharedJobManager().list();
+		const lines: string[] = [theme.bold("Background jobs")];
+		if (jobs.length === 0) {
+			lines.push(theme.fg("dim", "No background jobs. Use the BashSpawn tool to start one."));
+		} else {
+			for (const j of jobs) {
+				const ageSec = Math.max(0, Math.floor((Date.now() - j.startedAt) / 1000));
+				const age = ageSec < 60 ? `${ageSec}s` : `${Math.floor(ageSec / 60)}m`;
+				const statusColor = j.status === "running" ? "warning" : j.status === "exited" ? "success" : "error";
+				const exitTag = j.status !== "running" && j.exitCode !== undefined ? ` exit=${j.exitCode}` : "";
+				lines.push(
+					`${theme.fg("accent", `[${j.id}]`)} ${theme.fg(statusColor, j.status)}${exitTag} · ${theme.fg("dim", `${age} · pid ${j.pid ?? "?"}`)}\n   ${theme.fg("dim", j.command)}`,
+				);
+			}
+			lines.push(theme.fg("dim", "/job <id> for output · /kill <id> to terminate"));
+		}
+		this.showStatus(lines.join("\n"));
+	}
+
+	private handleJobCommand(arg: string): void {
+		if (!arg) {
+			this.showStatus(theme.fg("dim", "Usage: /job <id>"));
+			return;
+		}
+		const jobs = getSharedJobManager();
+		const info = jobs.get(arg);
+		if (!info) {
+			this.showStatus(theme.fg("warning", `No job with id "${arg}". Run /jobs to see ids.`));
+			return;
+		}
+		const snap = jobs.tail(arg, 4096);
+		const ageSec = Math.max(0, Math.floor((Date.now() - info.startedAt) / 1000));
+		const age = ageSec < 60 ? `${ageSec}s` : `${Math.floor(ageSec / 60)}m`;
+		const lines: string[] = [
+			`${theme.bold(`Job ${info.id}`)} ${theme.fg("dim", `${info.status} · ${age} · pid ${info.pid ?? "?"}`)}`,
+			theme.fg("dim", info.command),
+		];
+		if (snap?.bytesDropped) {
+			lines.push(theme.fg("warning", `(earlier ${snap.bytesDropped} bytes dropped from ring buffer)`));
+		}
+		const tail = snap?.tail ?? "(no output yet)";
+		lines.push(theme.fg("toolOutput", tail));
+		this.showStatus(lines.join("\n"));
+	}
+
+	private async handleKillCommand(arg: string): Promise<void> {
+		if (!arg) {
+			this.showStatus(theme.fg("dim", "Usage: /kill <id> [--force]"));
+			return;
+		}
+		const force = arg.includes("--force");
+		const id = arg.replace("--force", "").trim();
+		const result = await getSharedJobManager().kill(id, force);
+		this.showStatus(theme.fg(result.ok ? "success" : "warning", result.message));
+	}
+
+	private async handleUndoCommand(targetId: string | undefined): Promise<void> {
+		const checkpoints = this.session.listCheckpoints();
+		if (checkpoints.length === 0) {
+			this.showStatus(
+				theme.fg(
+					"dim",
+					"No checkpoints to undo. Checkpoints are created automatically before each edit/write. Bash mutations are not covered.",
+				),
+			);
+			return;
+		}
+		const result = await this.session.undoCheckpoint(targetId);
+		const color = result.ok ? "success" : "warning";
+		this.showStatus(theme.fg(color, result.message));
+	}
+
+	private handleCheckpointsCommand(): void {
+		const checkpoints = this.session.listCheckpoints();
+		const lines: string[] = [theme.bold("Checkpoints")];
+		if (checkpoints.length === 0) {
+			lines.push(
+				theme.fg(
+					"dim",
+					"None yet. Auto-created before each edit/write (bash not covered). Use /undo to restore the most recent.",
+				),
+			);
+		} else {
+			for (const c of checkpoints) {
+				const ageSec = Math.max(0, Math.floor((Date.now() - c.createdAt) / 1000));
+				const age = ageSec < 60 ? `${ageSec}s ago` : `${Math.floor(ageSec / 60)}m ago`;
+				lines.push(`${theme.fg("accent", `[${c.id}]`)} ${theme.fg("dim", age)} — ${theme.fg("dim", c.reason)}`);
+			}
+			lines.push(theme.fg("dim", "/undo to restore the most recent · /undo <id> to restore a specific one"));
+		}
+		this.showStatus(lines.join("\n"));
+	}
+
+	private handleTeamsCommand(arg: string): void {
+		const current = this.session.getTeamsEnabled();
+		if (arg === "" || arg === "status") {
+			const state = current ? theme.fg("success", "ON") : theme.fg("warning", "OFF");
+			this.showStatus(
+				`${theme.bold("Agent teams")} ${state}\n` +
+					theme.fg(
+						"dim",
+						current
+							? "Agents with `canSpawn: true` (e.g. tech-lead) can dispatch other subagents. /teams off to disable."
+							: "Agents with `canSpawn: true` cannot dispatch other subagents. Individual /agents still work. /teams on to enable.",
+					),
+			);
+			return;
+		}
+		if (arg === "on" || arg === "enable" || arg === "true") {
+			this.session.setTeamsEnabled(true);
+			this.showStatus(`Agent teams ${theme.fg("success", "ON")}`);
+			return;
+		}
+		if (arg === "off" || arg === "disable" || arg === "false") {
+			this.session.setTeamsEnabled(false);
+			this.showStatus(`Agent teams ${theme.fg("warning", "OFF")}`);
+			return;
+		}
+		this.showStatus(`Unknown argument "${arg}". Use: /teams on | off | status`);
+	}
+
+	private handleAgentsCommand(): void {
+		const registry = this.session.resourceLoader.getAgentRegistry();
+		const all = registry.all();
+		const teamsEnabled = this.session.getTeamsEnabled();
+		const teamsBadge = teamsEnabled ? theme.fg("success", "teams ON") : theme.fg("warning", "teams OFF");
+		const lines: string[] = [`${theme.bold("Subagents")} · ${teamsBadge} · ${theme.fg("dim", "/teams to toggle")}`];
+		if (all.length === 0) {
+			lines.push(
+				theme.fg(
+					"dim",
+					'No subagents defined. Drop a markdown file with `name`/`description` frontmatter into ~/.pi/agents/ or .pi/agents/. Invoke them via the Task tool, e.g. `Task(agent: "code-reviewer", prompt: "...")`.',
+				),
+			);
+		} else {
+			for (const def of all) {
+				const scopeTag = def.scope === "project" ? theme.fg("warning", "[project]") : theme.fg("muted", "[user]");
+				const toolsStr = def.tools && def.tools.length > 0 ? def.tools.join(", ") : "read, grep, find, ls";
+				const modelStr = def.model ? ` · model=${def.model}` : "";
+				const canSpawnTag = def.canSpawn
+					? teamsEnabled
+						? ` ${theme.fg("accent", "(canSpawn)")}`
+						: ` ${theme.fg("dim", "(canSpawn — currently disabled)")}`
+					: "";
+				lines.push(
+					`${scopeTag} ${theme.fg("accent", def.name)}${canSpawnTag} — ${theme.fg("dim", def.description)}`,
+				);
+				lines.push(`   ${theme.fg("dim", `tools: ${toolsStr}${modelStr}`)}`);
+			}
+		}
+		this.showStatus(lines.join("\n"));
+	}
+
+	private handleMemoryCommand(): void {
+		const memory = this.session.resourceLoader.getMemoryFiles();
+		const lines: string[] = [theme.bold("Memory")];
+		if (memory.memoryFiles.length === 0) {
+			lines.push(theme.fg("dim", "No memory files loaded. Drop markdown files into ~/.pi/memory/ or .pi/memory/."));
+		} else {
+			for (const file of memory.memoryFiles) {
+				const sizeStr = file.bytes < 1024 ? `${file.bytes}B` : `${(file.bytes / 1024).toFixed(1)}K`;
+				const truncatedTag = file.truncated ? theme.fg("warning", " (truncated)") : "";
+				const desc = file.description ? `\n   ${theme.fg("dim", file.description)}` : "";
+				lines.push(`${theme.fg("accent", file.name)} ${theme.fg("dim", `(${sizeStr})`)}${truncatedTag}${desc}`);
+			}
+		}
+		this.showStatus(lines.join("\n"));
 	}
 
 	private handleSessionCommand(): void {

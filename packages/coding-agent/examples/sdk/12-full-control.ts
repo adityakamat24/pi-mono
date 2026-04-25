@@ -43,6 +43,8 @@ const resourceLoader: ResourceLoader = {
 	getPrompts: () => ({ prompts: [], diagnostics: [] }),
 	getThemes: () => ({ themes: [], diagnostics: [] }),
 	getAgentsFiles: () => ({ agentsFiles: [] }),
+	getMemoryFiles: () => ({ memoryFiles: [], toc: undefined }),
+	getAgentRegistry: () => ({ lookup: () => undefined, list: () => [], all: () => [] }),
 	getSystemPrompt: () => `You are a minimal assistant.
 Available: read, bash. Be concise.`,
 	getAppendSystemPrompt: () => [],

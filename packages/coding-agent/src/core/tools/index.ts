@@ -17,6 +17,14 @@ export {
 	type EditToolInput,
 	type EditToolOptions,
 } from "./edit.js";
+export {
+	createExitPlanModeTool,
+	createExitPlanModeToolDefinition,
+	EXIT_PLAN_MODE_TOOL_NAME,
+	type ExitPlanModeDetails,
+	type ExitPlanModeInput,
+	type ExitPlanModeToolOptions,
+} from "./exit-plan-mode.js";
 export { withFileMutationQueue } from "./file-mutation-queue.js";
 export {
 	createFindTool,
@@ -72,6 +80,11 @@ import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "../extensions/types.js";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.js";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.js";
+import {
+	createExitPlanModeTool,
+	createExitPlanModeToolDefinition,
+	type ExitPlanModeToolOptions,
+} from "./exit-plan-mode.js";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.js";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.js";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.js";
@@ -91,6 +104,7 @@ export interface ToolsOptions {
 	grep?: GrepToolOptions;
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
+	exitPlanMode?: ExitPlanModeToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
@@ -153,6 +167,14 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 	];
 }
 
+/**
+ * Tool definitions exposed to the model while the session is in plan mode:
+ * the read-only set plus `ExitPlanMode` for ending the plan-mode flow.
+ */
+export function createPlanModeToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
+	return [...createReadOnlyToolDefinitions(cwd, options), createExitPlanModeToolDefinition(options?.exitPlanMode)];
+}
+
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
 	return {
 		read: createReadToolDefinition(cwd, options?.read),
@@ -181,6 +203,10 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 		createFindTool(cwd, options?.find),
 		createLsTool(cwd, options?.ls),
 	];
+}
+
+export function createPlanModeTools(cwd: string, options?: ToolsOptions): Tool[] {
+	return [...createReadOnlyTools(cwd, options), createExitPlanModeTool(options?.exitPlanMode)];
 }
 
 export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {

@@ -1,9 +1,10 @@
 import type { TextContent } from "@mariozechner/pi-ai";
 import type { Component } from "@mariozechner/pi-tui";
-import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@mariozechner/pi-tui";
+import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@mariozechner/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.js";
 import type { CustomMessage } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { RailContainer } from "./rail.js";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -12,7 +13,7 @@ import { getMarkdownTheme, theme } from "../theme/theme.js";
 export class CustomMessageComponent extends Container {
 	private message: CustomMessage<unknown>;
 	private customRenderer?: MessageRenderer;
-	private box: Box;
+	private rail: RailContainer;
 	private customComponent?: Component;
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
@@ -29,10 +30,17 @@ export class CustomMessageComponent extends Container {
 
 		this.addChild(new Spacer(1));
 
-		// Create box with purple background (used for default rendering)
-		this.box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+		// Pale-lavender rail used for the default rendering. Plan-approval
+		// messages get a success-colored rail (see updateRailColor).
+		this.rail = new RailContainer({
+			colorFn: (s: string) => theme.fg(this.railColorKey(), s),
+		});
 
 		this.rebuild();
+	}
+
+	private railColorKey(): "success" | "customMessageLabel" {
+		return this.message.customType === "plan_approved" ? "success" : "customMessageLabel";
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -53,7 +61,7 @@ export class CustomMessageComponent extends Container {
 			this.removeChild(this.customComponent);
 			this.customComponent = undefined;
 		}
-		this.removeChild(this.box);
+		this.removeChild(this.rail);
 
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
@@ -70,14 +78,16 @@ export class CustomMessageComponent extends Container {
 			}
 		}
 
-		// Default rendering uses our box
-		this.addChild(this.box);
-		this.box.clear();
+		// Default rendering uses the rail
+		const railColor = this.railColorKey();
+		this.rail.setColorFn((s: string) => theme.fg(railColor, s));
+		this.addChild(this.rail);
+		this.rail.clear();
 
 		// Default rendering: label + content
-		const label = theme.fg("customMessageLabel", `\x1b[1m[${this.message.customType}]\x1b[22m`);
-		this.box.addChild(new Text(label, 0, 0));
-		this.box.addChild(new Spacer(1));
+		const label = theme.fg(railColor, `\x1b[1m[${this.message.customType}]\x1b[22m`);
+		this.rail.addChild(new Text(label, 0, 0));
+		this.rail.addChild(new Spacer(1));
 
 		// Extract text content
 		let text: string;
@@ -90,7 +100,7 @@ export class CustomMessageComponent extends Container {
 				.join("\n");
 		}
 
-		this.box.addChild(
+		this.rail.addChild(
 			new Markdown(text, 0, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),

@@ -1078,26 +1078,53 @@ function convertMessages(
 		}
 	}
 
-	// Add cache_control to the last user message to cache conversation history
+	// Cache breakpoints — Anthropic allows up to 4. Today we use:
+	//   1. system prompt block(s)              (set in stream())
+	//   2. last tool definition                (set in convertTools())
+	//   3. last user message                   (below)
+	//   4. previous user message (non-OAuth)   (below — the rolling-window slot)
+	//
+	// The last-user breakpoint becomes a cache HIT on the next turn (since the
+	// prefix up to it is then fixed). Adding the previous-user breakpoint as
+	// well means a 2-turn-old prefix is also hit-cached, lengthening the
+	// effective "cache lifetime" across a multi-turn session.
+	const applyCacheToMessage = (msg: Anthropic.Messages.MessageParam): void => {
+		if (msg.role !== "user") return;
+		if (Array.isArray(msg.content)) {
+			const lastBlock = msg.content[msg.content.length - 1];
+			if (
+				lastBlock &&
+				(lastBlock.type === "text" || lastBlock.type === "image" || lastBlock.type === "tool_result")
+			) {
+				(lastBlock as any).cache_control = cacheControl;
+			}
+		} else if (typeof msg.content === "string") {
+			msg.content = [
+				{
+					type: "text",
+					text: msg.content,
+					cache_control: cacheControl,
+				},
+			] as any;
+		}
+	};
+
 	if (cacheControl && params.length > 0) {
-		const lastMessage = params[params.length - 1];
-		if (lastMessage.role === "user") {
-			if (Array.isArray(lastMessage.content)) {
-				const lastBlock = lastMessage.content[lastMessage.content.length - 1];
-				if (
-					lastBlock &&
-					(lastBlock.type === "text" || lastBlock.type === "image" || lastBlock.type === "tool_result")
-				) {
-					(lastBlock as any).cache_control = cacheControl;
+		applyCacheToMessage(params[params.length - 1]);
+
+		// Add a second breakpoint at the previous user message, but only for
+		// non-OAuth sessions where we have a free slot. OAuth sessions already
+		// burn 2 slots on the dual system blocks (Claude Code identity + user
+		// system prompt) and cannot fit a fourth.
+		if (!isOAuthToken) {
+			let userCount = 0;
+			for (let i = params.length - 1; i >= 0; i--) {
+				if (params[i].role !== "user") continue;
+				userCount++;
+				if (userCount === 2) {
+					applyCacheToMessage(params[i]);
+					break;
 				}
-			} else if (typeof lastMessage.content === "string") {
-				lastMessage.content = [
-					{
-						type: "text",
-						text: lastMessage.content,
-						cache_control: cacheControl,
-					},
-				] as any;
 			}
 		}
 	}

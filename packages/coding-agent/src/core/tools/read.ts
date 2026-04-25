@@ -2,7 +2,7 @@ import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import { Text } from "@mariozechner/pi-tui";
 import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
+import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
@@ -10,6 +10,7 @@ import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { resolveReadPath } from "./path-utils.js";
+import { getSharedReadCache } from "./read-cache.js";
 import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
@@ -24,6 +25,8 @@ export type ReadToolInput = Static<typeof readSchema>;
 
 export interface ReadToolDetails {
 	truncation?: TruncationResult;
+	/** True when the result was served from the file-read cache. */
+	cached?: boolean;
 }
 
 /**
@@ -139,6 +142,31 @@ export function createReadToolDefinition(
 			ctx?,
 		) {
 			const absolutePath = resolveReadPath(path, cwd);
+
+			// File-read cache: only kicks in for full-file reads (no offset/limit)
+			// using the default local operations. Custom operations (SSH/remote)
+			// bypass the cache to keep the abstraction clean.
+			const cacheableRead = offset === undefined && limit === undefined && ops === defaultReadOperations;
+			const cache = cacheableRead ? getSharedReadCache() : undefined;
+			let cachedStat: { mtimeMs: number; size: number } | undefined;
+			if (cache) {
+				try {
+					const s = await fsStat(absolutePath);
+					cachedStat = { mtimeMs: s.mtimeMs, size: s.size };
+					const hit = cache.get(absolutePath, cachedStat.mtimeMs, cachedStat.size);
+					if (hit) {
+						return {
+							content: hit.content as (TextContent | ImageContent)[],
+							details: { ...(hit.details as ReadToolDetails | undefined), cached: true } as ReadToolDetails,
+						};
+					}
+				} catch {
+					// Stat failed — drop cache for this read and let the default path
+					// surface the proper error.
+					cachedStat = undefined;
+				}
+			}
+
 			return new Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }>(
 				(resolve, reject) => {
 					if (signal?.aborted) {
@@ -246,6 +274,21 @@ export function createReadToolDefinition(
 
 							if (aborted) return;
 							signal?.removeEventListener("abort", onAbort);
+							// Populate the cache only on a successful full-file read.
+							if (cache && cachedStat) {
+								let approxBytes = 0;
+								for (const c of content) {
+									if ("text" in c && typeof c.text === "string") approxBytes += c.text.length;
+									if ("data" in c && typeof c.data === "string") approxBytes += c.data.length;
+								}
+								cache.set(absolutePath, {
+									content: content as Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
+									details,
+									mtimeMs: cachedStat.mtimeMs,
+									size: cachedStat.size,
+									approxBytes,
+								});
+							}
 							resolve({ content, details });
 						} catch (error: any) {
 							signal?.removeEventListener("abort", onAbort);

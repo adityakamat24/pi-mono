@@ -35,6 +35,16 @@ function createSession(options: {
 					},
 				];
 
+	const totalsSnapshot = {
+		input: usage?.input ?? 0,
+		output: usage?.output ?? 0,
+		cacheRead: usage?.cacheRead ?? 0,
+		cacheWrite: usage?.cacheWrite ?? 0,
+		cost: usage?.cost.total ?? 0,
+		messageCount: usage ? 1 : 0,
+		thinkingTokens: 0,
+	};
+
 	const session = {
 		state: {
 			model: {
@@ -51,6 +61,8 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getUsageTotals: () => totalsSnapshot,
+		getMode: () => "normal" as const,
 		modelRegistry: {
 			isUsingOAuth: () => false,
 		},

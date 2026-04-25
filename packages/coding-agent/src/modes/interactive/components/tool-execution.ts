@@ -1,9 +1,11 @@
-import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@mariozechner/pi-tui";
+import { type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@mariozechner/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.js";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.js";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.js";
 import { convertToPng } from "../../../utils/image-convert.js";
-import { theme } from "../theme/theme.js";
+import { GLYPHS } from "../theme/glyphs.js";
+import { type ThemeColor, theme } from "../theme/theme.js";
+import { RailContainer } from "./rail.js";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -11,7 +13,8 @@ export interface ToolExecutionOptions {
 }
 
 export class ToolExecutionComponent extends Container {
-	private contentBox: Box;
+	private contentRail: RailContainer;
+	private statusGlyph: Text;
 	private contentText: Text;
 	private selfRenderContainer: Container;
 	private callRendererComponent?: Component;
@@ -39,6 +42,10 @@ export class ToolExecutionComponent extends Container {
 	};
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
+	// Live timing for the inline (Xms · ~Yk) tag rendered after the rail body.
+	private executionStartedAt: number | undefined = undefined;
+	private executionDurationMs: number | undefined = undefined;
+	private timingFooter: Text | undefined = undefined;
 
 	constructor(
 		toolName: string,
@@ -62,20 +69,39 @@ export class ToolExecutionComponent extends Container {
 
 		this.addChild(new Spacer(1));
 
-		// Always create all shell variants. contentBox is used for default renderer-based composition.
-		// selfRenderContainer is used when the tool renders its own framing.
-		// contentText is reserved for generic fallback rendering when no tool definition exists.
-		this.contentBox = new Box(1, 1, (text: string) => theme.bg("toolPendingBg", text));
-		this.contentText = new Text("", 1, 1, (text: string) => theme.bg("toolPendingBg", text));
+		// New visual: a status-colored rail wraps the tool's call/result rendering,
+		// with a status glyph as the first line so the kind and state are scannable
+		// at a glance (◌ pending, ◉ running, ● success, ✕ error).
+		this.statusGlyph = new Text("", 0, 0);
+		this.contentRail = new RailContainer({ colorFn: (s: string) => theme.fg("warning", s) });
+		this.contentText = new Text("", 0, 0);
 		this.selfRenderContainer = new Container();
 
 		if (this.hasRendererDefinition()) {
-			this.addChild(this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox);
+			if (this.getRenderShell() === "self") {
+				this.addChild(this.selfRenderContainer);
+			} else {
+				this.contentRail.addChild(this.statusGlyph);
+				this.addChild(this.contentRail);
+			}
 		} else {
-			this.addChild(this.contentText);
+			this.contentRail.addChild(this.statusGlyph);
+			this.contentRail.addChild(this.contentText);
+			this.addChild(this.contentRail);
 		}
 
 		this.updateDisplay();
+	}
+
+	/** Resolve the rail color and glyph for the current execution state. */
+	private getStatusVisual(): { color: ThemeColor; glyph: string } {
+		if (this.isPartial) {
+			return { color: "warning", glyph: this.executionStarted ? GLYPHS.toolRunning : GLYPHS.toolPending };
+		}
+		if (this.result?.isError) {
+			return { color: "error", glyph: GLYPHS.toolError };
+		}
+		return { color: "success", glyph: GLYPHS.toolSuccess };
 	}
 
 	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
@@ -151,6 +177,7 @@ export class ToolExecutionComponent extends Container {
 
 	markExecutionStarted(): void {
 		this.executionStarted = true;
+		this.executionStartedAt = Date.now();
 		this.updateDisplay();
 		this.ui.requestRender();
 	}
@@ -171,8 +198,31 @@ export class ToolExecutionComponent extends Container {
 	): void {
 		this.result = result;
 		this.isPartial = isPartial;
+		// Capture the final duration once the result is complete (not partial).
+		if (!isPartial && this.executionStartedAt !== undefined && this.executionDurationMs === undefined) {
+			this.executionDurationMs = Date.now() - this.executionStartedAt;
+		}
 		this.updateDisplay();
 		this.maybeConvertImagesForKitty();
+	}
+
+	/** Format `(187ms · 2.3k)` summary appended to a completed tool call's rail. */
+	private formatTimingFooter(): string | undefined {
+		if (this.executionDurationMs === undefined) return undefined;
+		const ms = this.executionDurationMs;
+		const duration = ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+		// Estimate token cost from the result's text content length (chars / 4).
+		let chars = 0;
+		for (const c of this.result?.content ?? []) {
+			if (typeof c.text === "string") chars += c.text.length;
+		}
+		const approxTokens = Math.round(chars / 4);
+		const tokenStr =
+			approxTokens >= 1000 ? `${(approxTokens / 1000).toFixed(1)}k` : approxTokens > 0 ? `${approxTokens}` : "";
+		const tag = tokenStr ? `${duration} · ~${tokenStr}` : duration;
+		const prefix = this.result?.isError ? "failed in " : "";
+		const cachedSuffix = (this.result?.details as { cached?: boolean } | undefined)?.cached ? " · cached" : "";
+		return `(${prefix}${tag}${cachedSuffix})`;
 	}
 
 	private maybeConvertImagesForKitty(): void {
@@ -226,20 +276,20 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
-		const bgFn = this.isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
-			: this.result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
+		const status = this.getStatusVisual();
+		// Status-colored rail communicates state instead of bg tints.
+		this.contentRail.setColorFn((s: string) => theme.fg(status.color, s));
+		this.statusGlyph.setText(theme.fg(status.color, status.glyph));
 
 		let hasContent = false;
 		this.hideComponent = false;
 		if (this.hasRendererDefinition()) {
-			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
-			if (renderContainer instanceof Box) {
-				renderContainer.setBgFn(bgFn);
-			}
+			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentRail;
 			renderContainer.clear();
+			if (renderContainer === this.contentRail) {
+				// Re-add the glyph row so it is the first line of the rail.
+				renderContainer.addChild(this.statusGlyph);
+			}
 
 			const callRenderer = this.getCallRenderer();
 			if (!callRenderer) {
@@ -288,9 +338,24 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 		} else {
-			this.contentText.setCustomBgFn(bgFn);
+			// Fallback path (no tool definition): rail color already set above.
 			this.contentText.setText(this.formatToolExecution());
 			hasContent = true;
+		}
+
+		// Inline timing tag at the bottom of the rail. Only when execution has
+		// completed (we have a duration and the call is no longer partial).
+		const timingFooterContainer =
+			this.hasRendererDefinition() && this.getRenderShell() !== "self" ? this.contentRail : undefined;
+		if (timingFooterContainer) {
+			const timingText = this.formatTimingFooter();
+			if (timingText) {
+				if (!this.timingFooter) {
+					this.timingFooter = new Text("", 0, 0);
+				}
+				this.timingFooter.setText(theme.fg("dim", timingText));
+				timingFooterContainer.addChild(this.timingFooter);
+			}
 		}
 
 		for (const img of this.imageComponents) {

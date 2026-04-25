@@ -1,7 +1,10 @@
 import { CancellableLoader, Container, Loader, Spacer, Text, type TUI } from "@mariozechner/pi-tui";
+import { PI_SPINNER_FRAMES, PI_SPINNER_INTERVAL_MS } from "../theme/spinner.js";
 import type { Theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { keyHint } from "./keybinding-hints.js";
+
+const SPINNER_INDICATOR = { frames: [...PI_SPINNER_FRAMES], intervalMs: PI_SPINNER_INTERVAL_MS };
 
 /** Loader wrapped with borders for extension UI */
 export class BorderedLoader extends Container {
@@ -20,6 +23,7 @@ export class BorderedLoader extends Container {
 				(s) => theme.fg("accent", s),
 				(s) => theme.fg("muted", s),
 				message,
+				SPINNER_INDICATOR,
 			);
 		} else {
 			this.signalController = new AbortController();
@@ -28,6 +32,7 @@ export class BorderedLoader extends Container {
 				(s) => theme.fg("accent", s),
 				(s) => theme.fg("muted", s),
 				message,
+				SPINNER_INDICATOR,
 			);
 		}
 		this.addChild(this.loader);

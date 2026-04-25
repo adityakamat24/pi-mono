@@ -339,6 +339,26 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 		unsubscribe?.();
 		unsubscribe = session.subscribe((event) => {
+			// In RPC mode there is no UI to render approval dialogs. Auto-deny tool
+			// approvals and auto-approve plan-mode exits to "normal" so non-interactive
+			// callers do not deadlock waiting on a never-arriving response. Emit the
+			// event (without the resolver, which can't be serialized) so observers see
+			// it happened.
+			if (event.type === "tool_approval_request") {
+				event.resolve({
+					outcome: "deny",
+					reason: "Tool approval requested in RPC mode; auto-denied.",
+				});
+				const { resolve: _r, ...rest } = event;
+				output(rest as unknown as typeof event);
+				return;
+			}
+			if (event.type === "plan_approval_request") {
+				event.resolve({ outcome: "approve", nextMode: "normal" });
+				const { resolve: _r, ...rest } = event;
+				output(rest as unknown as typeof event);
+				return;
+			}
 			output(event);
 		});
 	};

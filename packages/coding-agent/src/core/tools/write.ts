@@ -8,6 +8,7 @@ import { getLanguageFromPath, highlightCode } from "../../modes/interactive/them
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToCwd } from "./path-utils.js";
+import { getSharedReadCache } from "./read-cache.js";
 import { invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
@@ -222,6 +223,8 @@ export function createWriteToolDefinition(
 									if (aborted) return;
 									// Write the file contents.
 									await ops.writeFile(absolutePath, content);
+									// Wrote a new file content: drop any cached read for this path.
+									getSharedReadCache().invalidatePath(absolutePath);
 									if (aborted) return;
 									signal?.removeEventListener("abort", onAbort);
 									resolve({

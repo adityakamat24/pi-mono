@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added first-class **Plan Mode** and **Auto-Accept Edits** input modes (Claude Code parity). Cycle modes with `alt+m` (configurable via `app.mode.cycle`), or set explicitly with `/plan`, `/mode normal`, `/mode auto-edits`. Plan mode restricts the agent to read-only tools (`read`, `grep`, `find`, `ls`) plus the new `ExitPlanMode` tool, which presents a markdown plan to the user for approval before any writes happen. Auto-accept edits prompts the user before each `bash` call but auto-runs file edits. Mode persists across `/fork`, `/clone`, and reopen via a `mode_change` custom session entry. Adds `AgentSession.{getMode,setMode,cycleMode}` and new `AgentSessionEvent` cases (`mode_change`, `tool_approval_request`, `plan_approval_request`).
 - Added `ctx.ui.setWorkingVisible()` so extensions can hide the built-in interactive working loader row without reserving layout space, plus a border-status editor example that moves working state into a custom editor border ([#3674](https://github.com/badlogic/pi-mono/issues/3674))
 
 ### Fixed

@@ -1,23 +1,22 @@
 import { type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.js";
-import { theme } from "../theme/theme.js";
+import { modeHint, modeLabel } from "../../../core/mode/types.js";
+import { GLYPHS } from "../theme/glyphs.js";
+import { type ThemeColor, theme } from "../theme/theme.js";
 
 /**
  * Sanitize text for display in a single-line status.
  * Removes newlines, tabs, carriage returns, and other control characters.
  */
 function sanitizeStatusText(text: string): string {
-	// Replace newlines, tabs, carriage returns with space, then collapse multiple spaces
 	return text
 		.replace(/[\r\n\t]/g, " ")
 		.replace(/ +/g, " ")
 		.trim();
 }
 
-/**
- * Format token counts (similar to web-ui)
- */
+/** Format token counts (compact). */
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -26,9 +25,17 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
+/** Color the section divider in dim. */
+function divider(): string {
+	return ` ${theme.fg("dim", GLYPHS.sectionDivider)} `;
+}
+
 /**
- * Footer component that shows pwd, token stats, and context usage.
- * Computes token/context stats from session, gets git branch and extension statuses from provider.
+ * New footer: single line with rail prefix, accented section glyphs, and
+ * dotted dividers between groups (path · tokens · context · model).
+ *
+ * Falls back to a two-line layout when the terminal is too narrow to fit
+ * everything on one row.
  */
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
@@ -46,172 +53,132 @@ export class FooterComponent implements Component {
 		this.autoCompactEnabled = enabled;
 	}
 
-	/**
-	 * No-op: git branch caching now handled by provider.
-	 * Kept for compatibility with existing call sites in interactive-mode.
-	 */
 	invalidate(): void {
-		// No-op: git branch is cached/invalidated by provider
+		// Provider handles git branch caching; nothing to do here.
 	}
 
-	/**
-	 * Clean up resources.
-	 * Git watcher cleanup now handled by provider.
-	 */
 	dispose(): void {
-		// Git watcher cleanup handled by provider
+		// Provider handles git watcher cleanup.
 	}
 
 	render(width: number): string[] {
 		const state = this.session.state;
 
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
+		// Cumulative token / cost stats — O(1) read from the session's running totals.
+		const totals = this.session.getUsageTotals();
+		const totalInput = totals.input;
+		const totalOutput = totals.output;
+		const totalCacheRead = totals.cacheRead;
+		const totalCacheWrite = totals.cacheWrite;
+		const totalCost = totals.cost;
 
-		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
-			}
-		}
-
-		// Calculate context usage from session (handles compaction correctly).
-		// After compaction, tokens are unknown until the next LLM response.
+		// Context usage
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
-		// Replace home directory with ~
+		// Path group: pwd · branch · session name
 		let pwd = this.session.sessionManager.getCwd();
 		const home = process.env.HOME || process.env.USERPROFILE;
 		if (home && pwd.startsWith(home)) {
 			pwd = `~${pwd.slice(home.length)}`;
 		}
-
-		// Add git branch if available
 		const branch = this.footerData.getGitBranch();
-		if (branch) {
-			pwd = `${pwd} (${branch})`;
-		}
-
-		// Add session name if set
 		const sessionName = this.session.sessionManager.getSessionName();
-		if (sessionName) {
-			pwd = `${pwd} • ${sessionName}`;
+		const pathGroupParts: string[] = [theme.fg("dim", pwd)];
+		if (branch) {
+			pathGroupParts.push(`${theme.fg("success", GLYPHS.branch)} ${theme.fg("dim", branch)}`);
 		}
+		if (sessionName) {
+			pathGroupParts.push(theme.fg("dim", sessionName));
+		}
+		const pathGroup = pathGroupParts.join(theme.fg("dim", " · "));
 
-		// Build stats line
-		const statsParts = [];
-		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
-
-		// Show cost with "(sub)" indicator if using OAuth subscription
+		// Tokens group
+		const tokenParts: string[] = [];
+		if (totalInput)
+			tokenParts.push(`${theme.fg("accent", GLYPHS.arrowUp)}${theme.fg("dim", formatTokens(totalInput))}`);
+		if (totalOutput)
+			tokenParts.push(`${theme.fg("accent", GLYPHS.arrowDown)}${theme.fg("dim", formatTokens(totalOutput))}`);
+		if (totalCacheRead)
+			tokenParts.push(`${theme.fg("muted", GLYPHS.cacheRead)}${theme.fg("dim", formatTokens(totalCacheRead))}`);
+		if (totalCacheWrite)
+			tokenParts.push(`${theme.fg("muted", GLYPHS.cacheWrite)}${theme.fg("dim", formatTokens(totalCacheWrite))}`);
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		if (totalCost || usingSubscription) {
 			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			statsParts.push(costStr);
+			tokenParts.push(theme.fg("success", costStr));
 		}
+		const tokenGroup = tokenParts.join(" ");
 
-		// Colorize context percentage based on usage
-		let contextPercentStr: string;
-		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
-		const contextPercentDisplay =
+		// Context group: dial + 10-segment progress bar + percentage + window size.
+		// Bar segments are violet by default; turn warning at >70%, error at >90%
+		// for an at-a-glance "you're filling up" cue.
+		const autoIndicator = this.autoCompactEnabled ? " · auto" : "";
+		let contextColor: ThemeColor = "accent";
+		if (contextPercentValue > 90) contextColor = "error";
+		else if (contextPercentValue > 70) contextColor = "warning";
+
+		const totalSegments = 10;
+		const filledSegments =
 			contextPercent === "?"
-				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-		if (contextPercentValue > 90) {
-			contextPercentStr = theme.fg("error", contextPercentDisplay);
-		} else if (contextPercentValue > 70) {
-			contextPercentStr = theme.fg("warning", contextPercentDisplay);
-		} else {
-			contextPercentStr = contextPercentDisplay;
-		}
-		statsParts.push(contextPercentStr);
+				? 0
+				: Math.max(0, Math.min(totalSegments, Math.round((contextPercentValue / 100) * totalSegments)));
+		const bar =
+			theme.fg(contextColor, "▰".repeat(filledSegments)) +
+			theme.fg("borderMuted", "▱".repeat(totalSegments - filledSegments));
+		const tail = `${contextPercent === "?" ? "?" : `${contextPercent}%`} · ${formatTokens(contextWindow)}${autoIndicator}`;
+		const contextGroup = `${theme.fg(contextColor, GLYPHS.contextDial)} ${bar} ${theme.fg("dim", tail)}`;
 
-		let statsLeft = statsParts.join(" ");
-
-		// Add model name on the right side, plus thinking level if model supports it
+		// Model group
 		const modelName = state.model?.id || "no-model";
-
-		let statsLeftWidth = visibleWidth(statsLeft);
-
-		// If statsLeft is too wide, truncate it
-		if (statsLeftWidth > width) {
-			statsLeft = truncateToWidth(statsLeft, width, "...");
-			statsLeftWidth = visibleWidth(statsLeft);
-		}
-
-		// Calculate available space for padding (minimum 2 spaces between stats and model)
-		const minPadding = 2;
-
-		// Add thinking level indicator if model supports reasoning
-		let rightSideWithoutProvider = modelName;
+		let modelGroup = theme.fg("dim", modelName);
 		if (state.model?.reasoning) {
 			const thinkingLevel = state.thinkingLevel || "off";
-			rightSideWithoutProvider =
-				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+			const tail = thinkingLevel === "off" ? "thinking off" : thinkingLevel;
+			modelGroup = `${theme.fg("dim", modelName)} ${theme.fg("muted", `· ${tail}`)}`;
 		}
-
-		// Prepend the provider in parentheses if there are multiple providers and there's enough room
-		let rightSide = rightSideWithoutProvider;
 		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
-			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
-			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
-				// Too wide, fall back
-				rightSide = rightSideWithoutProvider;
-			}
+			modelGroup = `${theme.fg("muted", `(${state.model.provider})`)} ${modelGroup}`;
 		}
 
-		const rightSideWidth = visibleWidth(rightSide);
-		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+		// Compose: rail prefix + groups joined by dotted dividers
+		const railPrefix = `${theme.fg("dim", GLYPHS.railBar)} `;
+		const groups = [pathGroup, tokenGroup, contextGroup, modelGroup].filter((g) => visibleWidth(g) > 0);
+		const singleLine = railPrefix + groups.join(divider());
 
-		let statsLine: string;
-		if (totalNeeded <= width) {
-			// Both fit - add padding to right-align model
-			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-			statsLine = statsLeft + padding + rightSide;
+		const lines: string[] = [];
+
+		// Mode banner (above everything else when not normal)
+		const mode = this.session.getMode();
+		if (mode !== "normal") {
+			const label = modeLabel(mode).toLowerCase();
+			const hintText = modeHint(mode);
+			const badgeColor: ThemeColor = mode === "plan" ? "accent" : "warning";
+			const tail = hintText ? ` · ${hintText}` : "";
+			const badgeText = `${GLYPHS.modeBanner} ${label} on${tail} (alt+m to cycle)`;
+			lines.push(theme.fg(badgeColor, truncateToWidth(badgeText, width, "...")));
+		}
+
+		if (visibleWidth(singleLine) <= width) {
+			lines.push(singleLine);
 		} else {
-			// Need to truncate right side
-			const availableForRight = width - statsLeftWidth - minPadding;
-			if (availableForRight > 0) {
-				const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
-				const truncatedRightWidth = visibleWidth(truncatedRight);
-				const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
-				statsLine = statsLeft + padding + truncatedRight;
-			} else {
-				// Not enough space for right side at all
-				statsLine = statsLeft;
-			}
+			// Two-line fallback: path on top, stats/context/model on bottom.
+			const top = railPrefix + pathGroup;
+			const bottomGroups = [tokenGroup, contextGroup, modelGroup].filter((g) => visibleWidth(g) > 0);
+			const bottom = railPrefix + bottomGroups.join(divider());
+			lines.push(truncateToWidth(top, width, theme.fg("dim", "...")));
+			lines.push(truncateToWidth(bottom, width, theme.fg("dim", "...")));
 		}
 
-		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
-		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
-		// before and after the colored section independently.
-		const dimStatsLeft = theme.fg("dim", statsLeft);
-		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
-		const dimRemainder = theme.fg("dim", remainder);
-
-		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
-
-		// Add extension statuses on a single line, sorted by key alphabetically
+		// Extension statuses
 		const extensionStatuses = this.footerData.getExtensionStatuses();
 		if (extensionStatuses.size > 0) {
 			const sortedStatuses = Array.from(extensionStatuses.entries())
 				.sort(([a], [b]) => a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
 			const statusLine = sortedStatuses.join(" ");
-			// Truncate to terminal width with dim ellipsis for consistency with footer style
 			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
 		}
 
