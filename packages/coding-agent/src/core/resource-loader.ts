@@ -39,6 +39,8 @@ export interface ResourceLoader {
 	getAgentRegistry(): AgentRegistry;
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
+	/** Resolved user-scope agent directory (e.g. `~/.pi/agent`). Used by tools that persist state. */
+	getAgentDir(): string;
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(): Promise<void>;
 }
@@ -298,6 +300,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getAppendSystemPrompt(): string[] {
 		return this.appendSystemPrompt;
+	}
+
+	getAgentDir(): string {
+		return this.agentDir;
 	}
 
 	extendResources(paths: ResourceExtensionPaths): void {

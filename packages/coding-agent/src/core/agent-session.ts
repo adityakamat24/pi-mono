@@ -101,6 +101,7 @@ import { BASH_SPAWN_TOOL_NAME, createBashSpawnToolDefinition } from "./tools/bas
 import { createEnterPlanModeToolDefinition, ENTER_PLAN_MODE_TOOL_NAME } from "./tools/enter-plan-mode.js";
 import { createExitPlanModeToolDefinition, EXIT_PLAN_MODE_TOOL_NAME } from "./tools/exit-plan-mode.js";
 import { createAllToolDefinitions } from "./tools/index.js";
+import { createRememberToolDefinition, REMEMBER_TOOL_NAME } from "./tools/remember.js";
 import { createTaskToolDefinition, TASK_TOOL_NAME } from "./tools/task.js";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.js";
 import { createWebFetchToolDefinition, WEB_FETCH_TOOL_NAME } from "./tools/web-fetch.js";
@@ -1145,7 +1146,7 @@ export class AgentSession {
 
 	private _defaultActiveToolNames(): string[] {
 		if (this._baseToolsOverride) return Object.keys(this._baseToolsOverride);
-		return ["read", "bash", "edit", "write", ENTER_PLAN_MODE_TOOL_NAME];
+		return ["read", "bash", "edit", "write", ENTER_PLAN_MODE_TOOL_NAME, REMEMBER_TOOL_NAME];
 	}
 
 	/**
@@ -2691,6 +2692,14 @@ export class AgentSession {
 				createEnterPlanModeToolDefinition() as ToolDefinition,
 			);
 		}
+		// Remember is always registered so the model can persist user-specific
+		// facts/preferences/decisions to <agentDir>/memory/ across sessions.
+		if (!this._baseToolDefinitions.has(REMEMBER_TOOL_NAME)) {
+			this._baseToolDefinitions.set(
+				REMEMBER_TOOL_NAME,
+				createRememberToolDefinition({ agentDir: this._resourceLoader.getAgentDir() }) as ToolDefinition,
+			);
+		}
 
 		// Subagent `Task` tool: registered only when at least one agent definition
 		// is loaded from `~/.pi/agents/*.md` or `<cwd>/.pi/agents/*.md`. Keeps the
@@ -2860,6 +2869,12 @@ export class AgentSession {
 		// EnterPlanMode is always registered, regardless of mode, so the model
 		// can voluntarily switch into plan mode when the user asks.
 		this._baseToolDefinitions.set(ENTER_PLAN_MODE_TOOL_NAME, createEnterPlanModeToolDefinition() as ToolDefinition);
+		// Remember is always registered so the model can persist memories to
+		// <agentDir>/memory/ across sessions.
+		this._baseToolDefinitions.set(
+			REMEMBER_TOOL_NAME,
+			createRememberToolDefinition({ agentDir: this._resourceLoader.getAgentDir() }) as ToolDefinition,
+		);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -2886,7 +2901,7 @@ export class AgentSession {
 				? this._planModeActiveToolNamesFromBase()
 				: this._baseToolsOverride
 					? Object.keys(this._baseToolsOverride)
-					: ["read", "bash", "edit", "write", ENTER_PLAN_MODE_TOOL_NAME];
+					: ["read", "bash", "edit", "write", ENTER_PLAN_MODE_TOOL_NAME, REMEMBER_TOOL_NAME];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

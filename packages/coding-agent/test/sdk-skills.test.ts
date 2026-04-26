@@ -61,6 +61,7 @@ This is a test skill.
 			getAgentRegistry: () => ({ lookup: () => undefined, list: () => [], all: () => [] }),
 			getSystemPrompt: () => undefined,
 			getAppendSystemPrompt: () => [],
+			getAgentDir: () => "",
 			extendResources: () => {},
 			reload: async () => {},
 		};
@@ -96,6 +97,7 @@ This is a test skill.
 			getAgentRegistry: () => ({ lookup: () => undefined, list: () => [], all: () => [] }),
 			getSystemPrompt: () => undefined,
 			getAppendSystemPrompt: () => [],
+			getAgentDir: () => "",
 			extendResources: () => {},
 			reload: async () => {},
 		};

@@ -80,6 +80,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 				.sort(),
 		).toEqual([
 			"EnterPlanMode",
+			"Remember",
 			"bash",
 			"bash_spawn",
 			"dynamic_tool",

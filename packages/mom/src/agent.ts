@@ -460,6 +460,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 		getAgentRegistry: () => ({ lookup: () => undefined, list: () => [], all: () => [] }),
 		getSystemPrompt: () => systemPrompt,
 		getAppendSystemPrompt: () => [],
+		getAgentDir: () => "",
 		extendResources: () => {},
 		reload: async () => {},
 	};

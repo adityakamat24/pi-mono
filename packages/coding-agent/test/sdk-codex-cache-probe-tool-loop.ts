@@ -158,6 +158,7 @@ function createMinimalResourceLoader(systemPrompt: string): ResourceLoader {
 		getAgentRegistry: () => ({ lookup: () => undefined, list: () => [], all: () => [] }),
 		getSystemPrompt: () => systemPrompt,
 		getAppendSystemPrompt: () => [],
+		getAgentDir: () => "",
 		extendResources: () => {},
 		reload: async () => {},
 	};

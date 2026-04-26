@@ -225,6 +225,7 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 		getAgentRegistry: () => ({ lookup: () => undefined, list: () => [], all: () => [] }),
 		getSystemPrompt: () => undefined,
 		getAppendSystemPrompt: () => [],
+		getAgentDir: () => "",
 		extendResources: () => {},
 		reload: async () => {},
 	};
