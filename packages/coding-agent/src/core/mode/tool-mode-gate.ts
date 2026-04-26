@@ -68,8 +68,10 @@ export function needsApproval(mode: SessionMode, toolName: string): boolean {
 			// reaches execute() is a read-only tool and runs without a prompt.
 			return false;
 		case "auto-edits":
-			// Only bash prompts in auto-edits mode; edit/write/read auto-run.
-			return toolName === "bash";
+			// Only bash-like commands prompt in auto-edits mode; edit/write/read
+			// auto-run. bash_spawn is a long-running background bash equivalent
+			// — same blast radius, same gating.
+			return toolName === "bash" || toolName === "bash_spawn";
 		case "manual":
 			// Manual mode: gate every tool that mutates state or runs commands.
 			// Pure-read tools (read/grep/find/ls) auto-run; everything else —

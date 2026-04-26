@@ -1155,10 +1155,24 @@ export class AgentSession {
 
 	private _defaultActiveToolNames(): string[] {
 		if (this._baseToolsOverride) return Object.keys(this._baseToolsOverride);
-		// grep/find/ls are included so the model has navigation tools without
-		// reaching for `bash ls` (which is denied in plan mode and prompts in
-		// auto-edits). Matches the SDK default in sdk.ts.
-		return ["read", "bash", "edit", "write", "grep", "find", "ls", ENTER_PLAN_MODE_TOOL_NAME, REMEMBER_TOOL_NAME];
+		// All built-ins + meta tools are exposed by default. setActiveToolsByName
+		// filters against the registry, so listing names that don't end up
+		// registered (e.g. Task when no subagents exist) is a no-op. Keep this
+		// in lockstep with the SDK default in sdk.ts.
+		return [
+			"read",
+			"bash",
+			"edit",
+			"write",
+			"grep",
+			"find",
+			"ls",
+			BASH_SPAWN_TOOL_NAME,
+			WEB_FETCH_TOOL_NAME,
+			ENTER_PLAN_MODE_TOOL_NAME,
+			REMEMBER_TOOL_NAME,
+			TASK_TOOL_NAME,
+		];
 	}
 
 	/**
@@ -2913,7 +2927,7 @@ export class AgentSession {
 				? this._planModeActiveToolNamesFromBase()
 				: this._baseToolsOverride
 					? Object.keys(this._baseToolsOverride)
-					: ["read", "bash", "edit", "write", "grep", "find", "ls", ENTER_PLAN_MODE_TOOL_NAME, REMEMBER_TOOL_NAME];
+					: this._defaultActiveToolNames();
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

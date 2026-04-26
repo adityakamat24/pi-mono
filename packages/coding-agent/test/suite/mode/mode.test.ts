@@ -122,11 +122,13 @@ describe("needsApproval gate predicate", () => {
 		expect(needsApproval("plan", "bash")).toBe(false);
 	});
 
-	it("auto-edits mode: only bash requires approval", () => {
+	it("auto-edits mode: only bash and bash_spawn require approval", () => {
 		expect(needsApproval("auto-edits", "bash")).toBe(true);
+		expect(needsApproval("auto-edits", "bash_spawn")).toBe(true);
 		expect(needsApproval("auto-edits", "edit")).toBe(false);
 		expect(needsApproval("auto-edits", "write")).toBe(false);
 		expect(needsApproval("auto-edits", "read")).toBe(false);
+		expect(needsApproval("auto-edits", "web_fetch")).toBe(false);
 	});
 
 	it("manual mode: everything except read-only tools requires approval", () => {

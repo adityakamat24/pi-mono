@@ -16,6 +16,7 @@ import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { isInstallTelemetryEnabled } from "./telemetry.js";
 import { time } from "./timings.js";
+import { BASH_SPAWN_TOOL_NAME } from "./tools/bash-spawn.js";
 import { ENTER_PLAN_MODE_TOOL_NAME } from "./tools/enter-plan-mode-name.js";
 import {
 	createBashTool,
@@ -31,6 +32,7 @@ import {
 } from "./tools/index.js";
 import { REMEMBER_TOOL_NAME } from "./tools/remember-name.js";
 import { TASK_TOOL_NAME } from "./tools/task.js";
+import { WEB_FETCH_TOOL_NAME } from "./tools/web-fetch.js";
 
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
@@ -278,6 +280,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		"grep",
 		"find",
 		"ls",
+		BASH_SPAWN_TOOL_NAME,
+		WEB_FETCH_TOOL_NAME,
 		ENTER_PLAN_MODE_TOOL_NAME,
 		REMEMBER_TOOL_NAME,
 		TASK_TOOL_NAME,
