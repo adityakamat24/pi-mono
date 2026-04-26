@@ -311,6 +311,8 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	/** Set when an edit/write tool completes during the current agent run. Triggers a PR-pane summary line on agent_end. */
+	private _editsSinceLastSummary = false;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2990,6 +2992,9 @@ export class InteractiveMode {
 					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
+				if (!event.isError && this._isMutatingTool(event.toolName)) {
+					this._editsSinceLastSummary = true;
+				}
 				break;
 			}
 
@@ -3008,6 +3013,11 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+
+				if (this._editsSinceLastSummary) {
+					this._editsSinceLastSummary = false;
+					this._emitPrPaneBumper();
+				}
 
 				await this.checkShutdownRequested();
 
@@ -5448,14 +5458,57 @@ export class InteractiveMode {
 	}
 
 	private handlePrCommand(): void {
+		const diff = this._buildCurrentSessionDiff();
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new PrPaneComponent(diff));
+		this.ui.requestRender();
+	}
+
+	private _buildCurrentSessionDiff() {
 		const sessionId = this.session.sessionId;
 		const agentDir = this.session.resourceLoader.getAgentDir();
 		const snapshotsDir = path.join(agentDir, "sessions", sessionId, "snapshots");
 		const cwd = this.session.sessionManager.getCwd();
-		const diff = buildSessionDiff(snapshotsDir, cwd);
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new PrPaneComponent(diff));
-		this.ui.requestRender();
+		return buildSessionDiff(snapshotsDir, cwd);
+	}
+
+	/** True for tools whose completion should bump the cumulative session diff. */
+	private _isMutatingTool(toolName: string): boolean {
+		switch (toolName) {
+			case "edit":
+			case "write":
+			case "MultiEdit":
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * After a turn that included edit/write activity, emit a one-line marker in
+	 * the chat showing cumulative session-diff stats so the user can see the
+	 * change set growing without typing /pr proactively.
+	 *
+	 * Skipped silently if the diff has no real changes (edge case where edit
+	 * round-tripped to original content).
+	 */
+	private _emitPrPaneBumper(): void {
+		let diff: ReturnType<typeof this._buildCurrentSessionDiff>;
+		try {
+			diff = this._buildCurrentSessionDiff();
+		} catch {
+			return;
+		}
+		const fileCount = diff.files.filter((f) => f.status !== "skipped").length;
+		if (fileCount === 0 && diff.skippedCount === 0) return;
+		const filesStr = `${fileCount} file${fileCount === 1 ? "" : "s"} changed`;
+		const additions = theme.fg("toolDiffAdded", `+${diff.totalAdditions}`);
+		const deletions = theme.fg("toolDiffRemoved", `−${diff.totalDeletions}`);
+		const skippedNote = diff.skippedCount > 0 ? theme.fg("muted", ` · ${diff.skippedCount} skipped`) : "";
+		const railPrefix = `${theme.fg("dim", GLYPHS.railBar)} `;
+		const hint = theme.fg("dim", " · /pr to review");
+		const text = `${railPrefix}${theme.fg("dim", filesStr)} ${additions} ${deletions}${skippedNote}${hint}`;
+		this.chatContainer.addChild(new Text(text));
 	}
 
 	private handleTeamsCommand(arg: string): void {
