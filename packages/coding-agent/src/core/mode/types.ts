@@ -75,8 +75,13 @@ export interface PlanApprovalRequest {
 }
 
 export type PlanApprovalResult =
-	/** User approved and chose the next mode to switch into. */
-	| { outcome: "approve"; nextMode: Exclude<SessionMode, "plan"> }
+	/**
+	 * User approved and chose the next mode to switch into. If `editedPlan` is
+	 * set, the user revised the plan via an external editor before approving;
+	 * the gate should persist and inject the edited version, not the model's
+	 * original.
+	 */
+	| { outcome: "approve"; nextMode: Exclude<SessionMode, "plan">; editedPlan?: string }
 	/** User rejected; the model should revise the plan based on feedback. */
 	| { outcome: "reject"; feedback: string };
 

@@ -140,13 +140,18 @@ export function wrapToolWithModeGate<T extends AgentTool>(tool: T, ctx: ModeGate
 			const plan = typeof (params as { plan?: unknown })?.plan === "string" ? (params as { plan: string }).plan : "";
 			const decision = await ctx.requestPlanApproval({ toolCallId, plan });
 			if (decision.outcome === "approve") {
-				ctx.onPlanApproved(plan, decision.nextMode);
+				const wasEdited = typeof decision.editedPlan === "string" && decision.editedPlan !== plan;
+				const finalPlan = decision.editedPlan ?? plan;
+				ctx.onPlanApproved(finalPlan, decision.nextMode);
+				const editNotice = wasEdited
+					? " The user revised the plan in an external editor before approving — the approved plan re-injected as user-side context reflects their edits, which may differ from what you proposed. Treat the user's version as authoritative."
+					: "";
 				return {
 					content: [
 						{
 							type: "text" as const,
 							text:
-								`Plan approved by user. Mode switched to "${decision.nextMode}". ` +
+								`Plan approved by user. Mode switched to "${decision.nextMode}".${editNotice} ` +
 								`Proceed with the plan above using the now-available write tools.`,
 						},
 					],

@@ -3630,10 +3630,62 @@ export class InteractiveMode {
 					this.ui.setFocus(focus);
 					this.ui.requestRender();
 				};
-				const dialog = new PlanApprovalDialogComponent(request, onResolve, onFocusChange);
+				const onStatus = (msg: string) => this.showStatus(msg);
+				const onEditPlan = (currentPlan: string) => this.editPlanInExternalEditor(currentPlan);
+				const dialog = new PlanApprovalDialogComponent(request, onResolve, onFocusChange, onEditPlan, onStatus);
 				return { component: dialog, focus: dialog.getSelectList() };
 			});
 		});
+	}
+
+	/**
+	 * Pause the TUI, open `$VISUAL`/`$EDITOR` with the plan pre-populated in a
+	 * temp file, restart the TUI when the editor exits. Returns the edited
+	 * content, or null if no editor is configured / the editor exited non-zero.
+	 */
+	private async editPlanInExternalEditor(currentPlan: string): Promise<string | null> {
+		const editorCmd = process.env.VISUAL || process.env.EDITOR;
+		if (!editorCmd) {
+			this.showWarning("No external editor configured. Set $VISUAL or $EDITOR to revise plans inline.");
+			return null;
+		}
+
+		const tmpFile = path.join(os.tmpdir(), `pi-plan-${Date.now()}.md`);
+		try {
+			fs.writeFileSync(tmpFile, currentPlan, "utf-8");
+
+			this.ui.stop();
+			const [editor, ...editorArgs] = editorCmd.split(" ");
+			const result = spawnSync(editor, [...editorArgs, tmpFile], {
+				stdio: "inherit",
+				shell: process.platform === "win32",
+			});
+			this.ui.start();
+			this.ui.requestRender(true);
+
+			if (result.status !== 0) {
+				this.showStatus("Editor exited without saving — plan not modified.");
+				return null;
+			}
+			return fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			this.showError(`Failed to launch external editor: ${msg}`);
+			// Make sure the TUI is back up even if spawn threw mid-way.
+			try {
+				this.ui.start();
+				this.ui.requestRender(true);
+			} catch {
+				/* already running */
+			}
+			return null;
+		} finally {
+			try {
+				fs.unlinkSync(tmpFile);
+			} catch {
+				/* ignore */
+			}
+		}
 	}
 
 	private async cycleModel(direction: "forward" | "backward"): Promise<void> {
