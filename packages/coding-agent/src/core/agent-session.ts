@@ -263,6 +263,34 @@ interface ToolDefinitionEntry {
 // ============================================================================
 
 /** Standard thinking levels */
+/**
+ * CamelCase / PascalCase aliases for pi's lowercase + snake_case tool names.
+ *
+ * Models trained on Claude Code's tool naming (`Edit`, `Bash`, `BashSpawn`,
+ * `WebFetch`, …) will frequently hallucinate those casings when calling pi's
+ * tools, even when the system prompt lists `edit` / `bash` / `bash_spawn` /
+ * `web_fetch`. Without aliases, those calls would fail with "Tool not found"
+ * and the agent loop stalls. setActiveToolsByName uses this map to register
+ * a duplicate AgentTool entry for each alias — same wrapped execute, same
+ * gate behavior (the wrapper closure captured the canonical name), just a
+ * different `name` field so lookups by alias succeed.
+ *
+ * Aliases that match the canonical (Task / Remember / EnterPlanMode /
+ * ExitPlanMode) are listed for completeness but skipped at registration time
+ * since they would create no-op duplicates.
+ */
+const TOOL_NAME_ALIASES: Record<string, string> = {
+	Read: "read",
+	Bash: "bash",
+	Edit: "edit",
+	Write: "write",
+	Grep: "grep",
+	Find: "find",
+	Ls: "ls",
+	BashSpawn: "bash_spawn",
+	WebFetch: "web_fetch",
+};
+
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
 /** Thinking levels including xhigh (for supported models) */
@@ -515,7 +543,14 @@ export class AgentSession {
 	 * but they can't dispatch other subagents.
 	 */
 	setTeamsEnabled(enabled: boolean): void {
+		if (this._teamsEnabled === enabled) return;
 		this._teamsEnabled = enabled;
+		// Rebuild the system prompt so the teams-orchestration nudge appears or
+		// disappears on the next agent turn. Without this, /teams on would have
+		// no effect until something else triggered a prompt rebuild (like mode
+		// change or tool registry refresh).
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
 	private _loadPermissionsFromSettings(): void {
@@ -1222,9 +1257,30 @@ export class AgentSession {
 				validToolNames.push(name);
 			}
 		}
-		this.agent.state.tools = wrapToolsWithModeGate(tools, this._modeGateContext());
+		const wrappedTools = wrapToolsWithModeGate(tools, this._modeGateContext());
 
-		// Rebuild base system prompt with new tool set
+		// Register CamelCase aliases for the lowercase / snake_case canonical
+		// tool names. Models trained on Claude-Code-style tool names (Edit,
+		// Bash, BashSpawn, WebFetch, …) will hallucinate those casings even
+		// when our system prompt lists `edit` / `bash` / `bash_spawn` /
+		// `web_fetch`. Without aliases, those calls fail with "Tool not found"
+		// and the model gets confused. With aliases, the call resolves to the
+		// same wrapped tool and the gate / mode logic still uses the original
+		// canonical name (the wrapper closure captured it). The aliases are
+		// only added to `state.tools`; they're NOT in `validToolNames`, so the
+		// system prompt's tool list remains clean (canonical names only).
+		const aliasedTools: AgentTool[] = [];
+		for (const [alias, canonical] of Object.entries(TOOL_NAME_ALIASES)) {
+			if (alias === canonical) continue;
+			const wrapped = wrappedTools.find((t) => t.name === canonical);
+			if (wrapped) {
+				aliasedTools.push({ ...wrapped, name: alias });
+			}
+		}
+
+		this.agent.state.tools = [...wrappedTools, ...aliasedTools];
+
+		// Rebuild base system prompt with the canonical tool names only.
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
@@ -1371,6 +1427,8 @@ export class AgentSession {
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 		const memory = this._resourceLoader.getMemoryFiles();
 
+		const availableAgents = this._resourceLoader.getAgentRegistry().list();
+
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
 			skills: loadedSkills,
@@ -1383,6 +1441,8 @@ export class AgentSession {
 			memoryFiles: memory.memoryFiles.map((m) => ({ path: m.path, name: m.name, content: m.content })),
 			memoryToc: memory.toc,
 			mode: this._mode,
+			availableAgents,
+			teamsEnabled: this._teamsEnabled,
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}

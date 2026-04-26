@@ -29,6 +29,10 @@ export interface BuildSystemPromptOptions {
 	memoryToc?: string;
 	/** Current session input mode. Influences the preamble. */
 	mode?: SessionMode;
+	/** Names of available subagents (when registered) for the teams-orchestration nudge. */
+	availableAgents?: string[];
+	/** Whether agent teams are enabled (`/teams on`). When true, the tech-lead orchestrator can dispatch others. */
+	teamsEnabled?: boolean;
 }
 
 /** Build the `# Memory` section appended to the system prompt. */
@@ -44,6 +48,27 @@ function buildMemorySection(
 	}
 	for (const file of memoryFiles) {
 		out += `## ${file.name}\n\n${file.content.trim()}\n\n`;
+	}
+	return out;
+}
+
+/**
+ * Inject a strong nudge when the user has explicitly enabled agent teams
+ * AND a tech-lead-style orchestrator is available. Without this, models
+ * (especially DeepSeek-V4) tend to stay monolithic instead of dispatching
+ * Task subagents even when the user explicitly asks for them.
+ */
+function buildAgentTeamsSection(availableAgents: string[] | undefined, teamsEnabled: boolean | undefined): string {
+	if (!teamsEnabled) return "";
+	if (!availableAgents || availableAgents.length === 0) return "";
+	const orchestrator = availableAgents.includes("tech-lead") ? "tech-lead" : undefined;
+	const list = availableAgents.map((a) => `\`${a}\``).join(", ");
+	let out = "\n\n# Agent teams enabled\n\n";
+	out += `The user has \`/teams on\` and the following subagents are loaded: ${list}.\n\n`;
+	out +=
+		"When the user explicitly asks for sub-agents / agent teams / a specific agent by name, you MUST dispatch via the `Task` tool. Do not go monolithic — that bypasses what the user asked for.\n\n";
+	if (orchestrator) {
+		out += `For multi-component builds (a game, an app, a refactor across many files), prefer ONE call to \`Task(agent: "tech-lead", prompt: ...)\` — the orchestrator fans out to the other subagents in turn. You don't need to dispatch each child yourself.\n\n`;
 	}
 	return out;
 }
@@ -79,9 +104,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		memoryFiles: providedMemoryFiles,
 		memoryToc,
 		mode,
+		availableAgents,
+		teamsEnabled,
 	} = options;
 	const planPreamble = mode === "plan" ? PLAN_MODE_PREAMBLE : "";
 	const memorySection = buildMemorySection(providedMemoryFiles ?? [], memoryToc);
+	const teamsSection = buildAgentTeamsSection(availableAgents, teamsEnabled);
 	const resolvedCwd = cwd;
 	const promptCwd = resolvedCwd.replace(/\\/g, "/");
 
@@ -101,6 +129,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 		if (appendSection) {
 			prompt += appendSection;
+		}
+
+		if (teamsSection) {
+			prompt += teamsSection;
 		}
 
 		// Memory section (persistent notes from ~/.pi/memory and .pi/memory).
@@ -201,6 +233,10 @@ Pi documentation (read only when the user asks about pi itself, its SDK, extensi
 
 	if (appendSection) {
 		prompt += appendSection;
+	}
+
+	if (teamsSection) {
+		prompt += teamsSection;
 	}
 
 	// Memory section (persistent notes from ~/.pi/memory and .pi/memory).

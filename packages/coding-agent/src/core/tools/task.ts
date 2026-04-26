@@ -66,9 +66,11 @@ export interface TaskToolDeps {
 }
 
 const PROMPT_GUIDELINES = [
+	"You MUST call `Task` to dispatch a named subagent whenever the user explicitly asks for it — phrases like 'use the explorer agent', 'use sub-agents', 'use agent teams', 'dispatch the tech-lead', 'use the implementer to build it', or 'spawn an explore agent'. Failing to dispatch when asked is a behavioral bug, not a stylistic choice.",
+	'For multi-component builds (a game, an app, a refactor across many files), prefer the `tech-lead` orchestrator subagent if available — it spawns explorer / refactor-planner / implementer / code-reviewer in turn. One `Task(agent: "tech-lead", ...)` call is enough; the orchestrator handles the rest.',
 	"Use Task to delegate a focused piece of work — code review, exploration, research — to a named subagent. The child has restricted tools and returns a concise summary.",
-	"Pass the child everything it needs in `prompt`; the child does not see your conversation.",
-	"Do NOT use Task for trivial questions you can answer yourself. Subagents add cost and latency.",
+	"Pass the child everything it needs in `prompt`; the child does not see your conversation. Include enough context that the child can act standalone.",
+	"Do NOT use Task for trivial questions you can answer yourself in one or two tool calls. Subagents add cost and latency — they pay off on multi-step focused work.",
 ];
 
 export function createTaskToolDefinition(deps: TaskToolDeps): ToolDefinition<typeof taskSchema, TaskToolDetails> {

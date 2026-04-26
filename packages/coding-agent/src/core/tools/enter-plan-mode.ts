@@ -42,8 +42,8 @@ const PROMPT_SNIPPET =
 	"EnterPlanMode(reason?: string): switch the session into plan mode. After this call, only read-only tools (read, grep, find, ls) auto-run; the model must research and then call ExitPlanMode with a markdown plan that the user approves.";
 
 const PROMPT_GUIDELINES = [
-	"Call EnterPlanMode when the user asks you to plan, design, or otherwise asks to 'use plan mode' / 'plan this out' for a coding task that involves writing code. Examples: 'plan a refactor of X', 'use plan mode to design Y', 'first plan, then implement'.",
-	"Once in plan mode, you may only use read-only tools (`read`, `grep`, `find`, `ls`). Research thoroughly using those, then call `ExitPlanMode` exactly once with a numbered markdown plan describing the concrete changes you would make. The user will approve or reject the plan in a dialog.",
+	"You MUST call `EnterPlanMode` as your FIRST action — before any other tool call — whenever the user mentions plan mode, planning, or asks you to plan something out. Trigger phrases: 'use plan mode', 'plan this out', 'plan it properly', 'first plan then implement', 'plan a refactor', 'plan an app', 'design X then build it'. Do NOT write an inline plan in chat instead — that bypasses the user's approval dialog and is a behavioral bug.",
+	"Once in plan mode you may only use read-only tools (`read`, `grep`, `find`, `ls`). Research thoroughly using those, then call `ExitPlanMode` exactly once with a numbered markdown plan describing the concrete changes you would make. The user approves or rejects the plan in a dialog; you do NOT need to ask them in chat.",
 	"Do NOT call EnterPlanMode for pure research, explanation, or Q&A tasks (e.g. 'how does X work?', 'where is Y defined?'). Just answer in chat using the read-only tools.",
 	"Do NOT call EnterPlanMode if the session is already in plan mode — it's a no-op.",
 ];

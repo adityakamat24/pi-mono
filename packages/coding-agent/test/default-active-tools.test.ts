@@ -147,4 +147,63 @@ describe("default active tool list", () => {
 			session.dispose();
 		}
 	});
+
+	it("registers CamelCase aliases for canonical tools so model-side typos resolve", async () => {
+		const session = await createDefaultSession();
+		try {
+			// agent.state.tools is the LLM-facing tool list including aliases.
+			const toolNames = new Set(session.agent.state.tools.map((t) => t.name));
+			const expectedAliases: Record<string, string> = {
+				Read: "read",
+				Bash: "bash",
+				Edit: "edit",
+				Write: "write",
+				Grep: "grep",
+				Find: "find",
+				Ls: "ls",
+				BashSpawn: "bash_spawn",
+				WebFetch: "web_fetch",
+			};
+			for (const [alias, canonical] of Object.entries(expectedAliases)) {
+				expect(toolNames.has(alias), `expected alias "${alias}" registered (canonical: ${canonical})`).toBe(true);
+				expect(toolNames.has(canonical), `expected canonical "${canonical}" still registered`).toBe(true);
+			}
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("alias and canonical share the same execute (gate behavior is identical)", async () => {
+		const session = await createDefaultSession();
+		try {
+			const tools = session.agent.state.tools;
+			const editCanonical = tools.find((t) => t.name === "edit");
+			const editAlias = tools.find((t) => t.name === "Edit");
+			expect(editCanonical, "canonical 'edit' should be in state.tools").toBeDefined();
+			expect(editAlias, "alias 'Edit' should be in state.tools").toBeDefined();
+			// Same execute closure — gate logic captured against the canonical
+			// name, so the alias inherits the right mode-gate behavior.
+			expect(editAlias?.execute).toBe(editCanonical?.execute);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("aliases do NOT leak into the system prompt's tool list (canonical names only)", async () => {
+		const session = await createDefaultSession();
+		try {
+			const sysPrompt = session.agent.state.systemPrompt ?? "";
+			// Canonical names appear in the prompt's "Available tools" section.
+			expect(sysPrompt).toContain("- edit:");
+			expect(sysPrompt).toContain("- bash:");
+			// CamelCase aliases must not appear as tool entries — they would
+			// confuse the model's choice and bloat the prompt.
+			expect(sysPrompt).not.toContain("- Edit:");
+			expect(sysPrompt).not.toContain("- Bash:");
+			expect(sysPrompt).not.toContain("- BashSpawn:");
+			expect(sysPrompt).not.toContain("- WebFetch:");
+		} finally {
+			session.dispose();
+		}
+	});
 });
