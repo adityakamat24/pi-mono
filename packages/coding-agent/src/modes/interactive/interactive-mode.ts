@@ -80,6 +80,7 @@ import type {
 } from "../../core/mode/types.js";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.js";
 import { DefaultPackageManager } from "../../core/package-manager.js";
+import { buildSessionDiff } from "../../core/pr-pane/diff-builder.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { type SessionContext, SessionManager } from "../../core/session-manager.js";
@@ -115,6 +116,7 @@ import { ModelSelectorComponent } from "./components/model-selector.js";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.js";
 import { PiHero } from "./components/pi-hero.js";
 import { PlanApprovalDialogComponent } from "./components/plan-approval-dialog.js";
+import { PrPaneComponent } from "./components/pr-pane.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
 import { SessionSelectorComponent } from "./components/session-selector.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
@@ -2652,6 +2654,11 @@ export class InteractiveMode {
 			if (text === "/checkpoints") {
 				this.editor.setText("");
 				this.handleCheckpointsCommand();
+				return;
+			}
+			if (text === "/pr") {
+				this.editor.setText("");
+				this.handlePrCommand();
 				return;
 			}
 			if (text === "/jobs") {
@@ -5438,6 +5445,17 @@ export class InteractiveMode {
 			lines.push(theme.fg("dim", "/undo to restore the most recent · /undo <id> to restore a specific one"));
 		}
 		this.showStatus(lines.join("\n"));
+	}
+
+	private handlePrCommand(): void {
+		const sessionId = this.session.sessionId;
+		const agentDir = this.session.resourceLoader.getAgentDir();
+		const snapshotsDir = path.join(agentDir, "sessions", sessionId, "snapshots");
+		const cwd = this.session.sessionManager.getCwd();
+		const diff = buildSessionDiff(snapshotsDir, cwd);
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new PrPaneComponent(diff));
+		this.ui.requestRender();
 	}
 
 	private handleTeamsCommand(arg: string): void {
