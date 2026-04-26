@@ -36,6 +36,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "kill", description: "Terminate a background job: /kill <id> [--force]" },
 	{ name: "memory", description: "List loaded memory files (~/.pi/memory and .pi/memory)" },
 	{ name: "pr", description: "Show cumulative session diff — every edit/write since session start" },
+	{ name: "pr-watch", description: "Toggle a live right-side PR pane that updates as the agent edits" },
 	{ name: "revert", description: "Revert a single hunk: /revert <relPath> <hunkIndex> (find indexes via /pr)" },
 	{ name: "plan", description: "Enter plan mode (research with read-only tools, then approve a plan)" },
 	{ name: "mode", description: "Set input mode: /mode normal | auto-edits | manual | plan" },

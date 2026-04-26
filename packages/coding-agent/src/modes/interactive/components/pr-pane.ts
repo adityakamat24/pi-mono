@@ -1,11 +1,16 @@
 /**
- * Phase 1 of the PR pane: a read-only chat insertion that shows the cumulative
- * session diff. Renders one block per touched file with a header row, hunk
- * separators, and intra-line word-level diff highlighting (reusing the
- * existing `renderDiff` infrastructure from `diff.ts`).
+ * PR-pane components.
  *
- * Future phases turn this into a live, addressable, scrollable side pane with
- * accept/revert/comment actions per hunk.
+ * - `PrPaneComponent` — full read-only diff dump used by the `/pr` slash
+ *   command. Insertable into chat scrollback.
+ * - `LivePrPaneComponent` — compact dashboard variant used by `/pr-watch`
+ *   as a right-side overlay. Shows cumulative stats + per-file summaries
+ *   only (no hunks; those stay in `/pr`). Designed to fit a ~50%-width
+ *   column without truncating the user's chat / editor area.
+ *
+ * Both expose `setDiff(diff)` so callers can rebuild the rendered children
+ * in place when the cumulative session diff changes (Phase 2 bumper trigger,
+ * Phase 6 live updates).
  */
 
 import { Container, Text } from "@mariozechner/pi-tui";
@@ -22,11 +27,6 @@ const STATUS_BADGE: Record<FileDiff["status"], { text: string; color: "success" 
 	unchanged: { text: "·", color: "muted" },
 };
 
-/**
- * Apply word-level intra-line highlighting to a paired removed/added line.
- * Mirrors the algorithm in `components/diff.ts:renderIntraLineDiff` but
- * operates on the HunkLine-level so we can mutate the displayed text only.
- */
 function intraLineHighlight(oldText: string, newText: string): { removed: string; added: string } {
 	const wordDiff = Diff.diffWords(oldText, newText);
 	let removed = "";
@@ -80,9 +80,6 @@ function renderHunk(hunk: Hunk, lineNumWidth: number): string[] {
 	const range = theme.fg("dim", `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
 	lines.push(`${tag} ${range}`);
 
-	// Walk the hunk and group adjacent -/+ runs so we can do intra-line
-	// highlighting when a single removed line is followed by a single added
-	// line — same heuristic as the existing renderDiff in `diff.ts`.
 	let i = 0;
 	while (i < hunk.lines.length) {
 		const line = hunk.lines[i];
@@ -92,7 +89,6 @@ function renderHunk(hunk: Hunk, lineNumWidth: number): string[] {
 			i++;
 			continue;
 		}
-		// Collect a run of removed lines, then a run of added lines.
 		const removedRun: typeof hunk.lines = [];
 		while (i < hunk.lines.length && hunk.lines[i].kind === "-") {
 			removedRun.push(hunk.lines[i]);
@@ -145,9 +141,19 @@ function summaryLine(diff: SessionDiff): string {
 	return `${theme.fg("dim", filesStr)} ${additions} ${deletions}${skippedNote}`;
 }
 
+/**
+ * Full PR pane — one block per file with all hunks rendered. Used by `/pr`
+ * (chat insertion). Heavy; the live overlay uses LivePrPaneComponent instead.
+ */
 export class PrPaneComponent extends Container {
 	constructor(diff: SessionDiff) {
 		super();
+		this.setDiff(diff);
+	}
+
+	/** Rebuild children for the new diff. */
+	setDiff(diff: SessionDiff): void {
+		this.clear();
 		this.addChild(new Text(""));
 		const header =
 			diff.files.length === 0
@@ -190,6 +196,57 @@ export class PrPaneComponent extends Container {
 				theme.fg(
 					"dim",
 					"Tip: /revert <path> <hunkIndex> to undo a single hunk (rebuild the diff with /pr afterwards). /undo to roll back the most recent change.",
+				),
+			),
+		);
+	}
+}
+
+/**
+ * Compact "live" PR pane for overlay use. Always-visible dashboard with
+ * cumulative stats + a per-file summary line. Designed to fit a ~50%-width
+ * right-side column without crowding out the chat or editor.
+ *
+ * Per-hunk content is intentionally NOT shown here — the static `/pr` chat
+ * insertion remains the place to inspect specific hunks. This pane is the
+ * "are we trending green?" dashboard, not the diff browser.
+ */
+export class LivePrPaneComponent extends Container {
+	constructor(diff: SessionDiff) {
+		super();
+		this.setDiff(diff);
+	}
+
+	/** Rebuild compact dashboard for the new diff. */
+	setDiff(diff: SessionDiff): void {
+		this.clear();
+
+		// Header row: tall accent banner. `≡ PR pane` left-justified, stats inline.
+		this.addChild(new Text(theme.fg("accent", theme.bold(`${GLYPHS.sectionDivider} PR pane`))));
+		this.addChild(new Text(summaryLine(diff)));
+		this.addChild(new Text(""));
+
+		if (diff.files.length === 0) {
+			this.addChild(new Text(theme.fg("dim", "No edits yet this session.")));
+			this.addChild(
+				new Text(
+					theme.fg("dim", "This pane updates live as the agent edits. /pr-watch to toggle. /pr for full hunks."),
+				),
+			);
+			return;
+		}
+
+		// One line per file: badge + path + stats.
+		for (const file of diff.files) {
+			this.addChild(new Text(fileHeaderLine(file)));
+		}
+
+		this.addChild(new Text(""));
+		this.addChild(
+			new Text(
+				theme.fg(
+					"dim",
+					`/pr for full hunks · /revert <path> <hunkIdx> to undo a hunk · /pr-watch to close this pane`,
 				),
 			),
 		);

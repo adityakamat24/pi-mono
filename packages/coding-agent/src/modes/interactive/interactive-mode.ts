@@ -116,7 +116,7 @@ import { ModelSelectorComponent } from "./components/model-selector.js";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.js";
 import { PiHero } from "./components/pi-hero.js";
 import { PlanApprovalDialogComponent } from "./components/plan-approval-dialog.js";
-import { PrPaneComponent } from "./components/pr-pane.js";
+import { LivePrPaneComponent, PrPaneComponent } from "./components/pr-pane.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
 import { SessionSelectorComponent } from "./components/session-selector.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
@@ -313,6 +313,9 @@ export class InteractiveMode {
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	/** Set when an edit/write tool completes during the current agent run. Triggers a PR-pane summary line on agent_end. */
 	private _editsSinceLastSummary = false;
+	/** Live PR-pane overlay state (Phase 6 split-pane). Both null when overlay is closed. */
+	private _livePrPaneHandle: OverlayHandle | undefined = undefined;
+	private _livePrPaneComponent: LivePrPaneComponent | undefined = undefined;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2663,6 +2666,11 @@ export class InteractiveMode {
 				this.handlePrCommand();
 				return;
 			}
+			if (text === "/pr-watch") {
+				this.editor.setText("");
+				this.togglePrWatch();
+				return;
+			}
 			if (text.startsWith("/revert")) {
 				this.editor.setText("");
 				const arg = text === "/revert" ? "" : text.slice(7).trim();
@@ -3000,6 +3008,9 @@ export class InteractiveMode {
 				}
 				if (!event.isError && this._isMutatingTool(event.toolName)) {
 					this._editsSinceLastSummary = true;
+					// If the live pane is open, refresh it now so the user sees the
+					// cumulative state evolve in real time, not just at agent_end.
+					this._refreshLivePrPane();
 				}
 				break;
 			}
@@ -5471,6 +5482,54 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * Toggle the live PR pane — a right-side overlay that shows cumulative
+	 * stats + per-file summaries and updates as the agent edits. Distinct
+	 * from `/pr` (which dumps the full diff into chat scrollback once).
+	 *
+	 * Uses pi-tui's overlay system with `nonCapturing: true` so the editor
+	 * keeps focus, and a `visible` predicate that hides the overlay on
+	 * terminals narrower than 120 columns to avoid squashing the editor.
+	 */
+	private togglePrWatch(): void {
+		if (this._livePrPaneHandle && this._livePrPaneComponent) {
+			this._livePrPaneHandle.hide();
+			this._livePrPaneHandle = undefined;
+			this._livePrPaneComponent = undefined;
+			this.showStatus("Live PR pane closed.");
+			return;
+		}
+		const diff = this._buildCurrentSessionDiff();
+		const pane = new LivePrPaneComponent(diff);
+		const handle = this.ui.showOverlay(pane, {
+			width: "45%",
+			minWidth: 40,
+			maxHeight: "70%",
+			anchor: "top-right",
+			margin: { top: 0, right: 0 },
+			nonCapturing: true,
+			visible: (termWidth) => termWidth >= 120,
+		});
+		this._livePrPaneHandle = handle;
+		this._livePrPaneComponent = pane;
+		this.showStatus(
+			"Live PR pane opened (right side, ≥120-col terminals only). /pr-watch again to close. Updates after each edit/write.",
+		);
+	}
+
+	/** Push a fresh diff to the live overlay if it's open. No-op otherwise. */
+	private _refreshLivePrPane(): void {
+		if (!this._livePrPaneComponent || !this._livePrPaneHandle) return;
+		try {
+			const diff = this._buildCurrentSessionDiff();
+			this._livePrPaneComponent.setDiff(diff);
+			this.ui.requestRender();
+		} catch {
+			// Diff build can fail transiently (snapshots dir not yet present);
+			// don't disrupt the agent loop over a render failure.
+		}
+	}
+
+	/**
 	 * `/revert <relPath> <hunkIndex>` — undo a single hunk. Looks up the hunk
 	 * via the freshly-rebuilt cumulative session diff, replaces that range in
 	 * the file with its session-start equivalent, and snapshots the prior
@@ -5587,6 +5646,8 @@ export class InteractiveMode {
 		// Auto-emit a fresh bumper so the user sees the new cumulative state.
 		this._editsSinceLastSummary = false;
 		this._emitPrPaneBumper();
+		// Update the live pane if open so it reflects the post-revert state.
+		this._refreshLivePrPane();
 
 		// Phase 3b: queue a follow-up note to the model so it knows the change
 		// was rolled back and can adjust on the next turn. Without this, the
