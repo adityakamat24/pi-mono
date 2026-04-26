@@ -3,18 +3,22 @@
  *
  * - "normal": all tools auto-execute (pi's historical default — no friction).
  * - "auto-edits": file-mutating tools auto-execute, but `bash` requires approval.
+ * - "manual": every tool that mutates state or runs a command prompts. Only the
+ *   pure-read tools (`read`, `grep`, `find`, `ls`) auto-run. Mirrors Claude
+ *   Code's "default" permission mode — every edit, write, bash, web_fetch, or
+ *   subagent dispatch asks first.
  * - "plan": only read-only tools and the `ExitPlanMode` tool are registered. The
  *   model researches, then must call `ExitPlanMode` with a markdown plan; the
  *   user approves and the session switches back to a non-plan mode.
  */
-export type SessionMode = "normal" | "auto-edits" | "plan";
+export type SessionMode = "normal" | "auto-edits" | "manual" | "plan";
 
-export const SESSION_MODES: ReadonlyArray<SessionMode> = ["normal", "auto-edits", "plan"];
+export const SESSION_MODES: ReadonlyArray<SessionMode> = ["normal", "auto-edits", "manual", "plan"];
 
 export const DEFAULT_SESSION_MODE: SessionMode = "normal";
 
-/** Order used by cycleMode(): normal -> auto-edits -> plan -> normal. */
-export const MODE_CYCLE_ORDER: ReadonlyArray<SessionMode> = ["normal", "auto-edits", "plan"];
+/** Order used by cycleMode(): normal -> auto-edits -> manual -> plan -> normal. */
+export const MODE_CYCLE_ORDER: ReadonlyArray<SessionMode> = ["normal", "auto-edits", "manual", "plan"];
 
 /** Human-readable label shown in the footer badge. */
 export function modeLabel(mode: SessionMode): string {
@@ -23,6 +27,8 @@ export function modeLabel(mode: SessionMode): string {
 			return "NORMAL";
 		case "auto-edits":
 			return "AUTO-ACCEPT EDITS";
+		case "manual":
+			return "MANUAL APPROVAL";
 		case "plan":
 			return "PLAN MODE";
 	}
@@ -35,6 +41,8 @@ export function modeHint(mode: SessionMode): string {
 			return "";
 		case "auto-edits":
 			return "bash will prompt";
+		case "manual":
+			return "every tool prompts";
 		case "plan":
 			return "read-only • call ExitPlanMode when ready";
 	}

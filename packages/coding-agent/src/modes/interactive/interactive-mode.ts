@@ -2675,7 +2675,9 @@ export class InteractiveMode {
 				this.editor.setText("");
 				const arg = text === "/mode" ? "" : text.slice(6).trim();
 				if (!arg) {
-					this.showStatus(`Current mode: ${this.session.getMode()} (usage: /mode normal | auto-edits | plan)`);
+					this.showStatus(
+						`Current mode: ${this.session.getMode()} (usage: /mode normal | auto-edits | manual | plan)`,
+					);
 					return;
 				}
 				this.setMode(arg);
@@ -3546,6 +3548,9 @@ export class InteractiveMode {
 		} else if (mode === "auto-edits") {
 			// Auto-accept edits: editor border in warning (amber) for at-a-glance state.
 			this.editor.borderColor = (str: string) => theme.fg("warning", str);
+		} else if (mode === "manual") {
+			// Manual: editor border in error (red) — every tool prompts, highest friction.
+			this.editor.borderColor = (str: string) => theme.fg("error", str);
 		} else {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
@@ -3573,8 +3578,8 @@ export class InteractiveMode {
 
 	private setMode(mode: string): void {
 		const trimmed = mode.trim();
-		if (trimmed !== "normal" && trimmed !== "auto-edits" && trimmed !== "plan") {
-			this.showStatus(`Unknown mode "${mode}". Use: normal | auto-edits | plan`);
+		if (trimmed !== "normal" && trimmed !== "auto-edits" && trimmed !== "manual" && trimmed !== "plan") {
+			this.showStatus(`Unknown mode "${mode}". Use: normal | auto-edits | manual | plan`);
 			return;
 		}
 		this.session.setMode(trimmed);
@@ -3597,7 +3602,11 @@ export class InteractiveMode {
 					done();
 					settle();
 				};
-				const dialog = new ToolApprovalDialogComponent(request, onResolve);
+				const onFocusChange = (focus: Component) => {
+					this.ui.setFocus(focus);
+					this.ui.requestRender();
+				};
+				const dialog = new ToolApprovalDialogComponent(request, onResolve, onFocusChange);
 				return { component: dialog, focus: dialog.getSelectList() };
 			});
 		});
@@ -3617,7 +3626,11 @@ export class InteractiveMode {
 					done();
 					settle();
 				};
-				const dialog = new PlanApprovalDialogComponent(request, onResolve);
+				const onFocusChange = (focus: Component) => {
+					this.ui.setFocus(focus);
+					this.ui.requestRender();
+				};
+				const dialog = new PlanApprovalDialogComponent(request, onResolve, onFocusChange);
 				return { component: dialog, focus: dialog.getSelectList() };
 			});
 		});

@@ -155,7 +155,7 @@ export class FooterComponent implements Component {
 		if (mode !== "normal") {
 			const label = modeLabel(mode).toLowerCase();
 			const hintText = modeHint(mode);
-			const badgeColor: ThemeColor = mode === "plan" ? "accent" : "warning";
+			const badgeColor: ThemeColor = mode === "plan" ? "accent" : mode === "manual" ? "error" : "warning";
 			const tail = hintText ? ` · ${hintText}` : "";
 			const badgeText = `${GLYPHS.modeBanner} ${label} on${tail} (alt+m to cycle)`;
 			lines.push(theme.fg(badgeColor, truncateToWidth(badgeText, width, "...")));

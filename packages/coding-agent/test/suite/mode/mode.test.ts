@@ -19,11 +19,13 @@ describe("session mode", () => {
 		}
 	});
 
-	it("cycles modes in normal -> auto-edits -> plan -> normal order", async () => {
+	it("cycles modes in normal -> auto-edits -> manual -> plan -> normal order", async () => {
 		const h = await createHarness();
 		try {
+			expect(MODE_CYCLE_ORDER).toEqual(["normal", "auto-edits", "manual", "plan"]);
 			expect(h.session.cycleMode()).toBe(MODE_CYCLE_ORDER[1]);
 			expect(h.session.cycleMode()).toBe(MODE_CYCLE_ORDER[2]);
+			expect(h.session.cycleMode()).toBe(MODE_CYCLE_ORDER[3]);
 			expect(h.session.cycleMode()).toBe(MODE_CYCLE_ORDER[0]);
 		} finally {
 			h.cleanup();
@@ -127,9 +129,25 @@ describe("needsApproval gate predicate", () => {
 		expect(needsApproval("auto-edits", "read")).toBe(false);
 	});
 
+	it("manual mode: everything except read-only tools requires approval", () => {
+		// Read-only tools auto-run.
+		expect(needsApproval("manual", "read")).toBe(false);
+		expect(needsApproval("manual", "grep")).toBe(false);
+		expect(needsApproval("manual", "find")).toBe(false);
+		expect(needsApproval("manual", "ls")).toBe(false);
+		// Mutating + command-running + extension tools all prompt.
+		expect(needsApproval("manual", "edit")).toBe(true);
+		expect(needsApproval("manual", "write")).toBe(true);
+		expect(needsApproval("manual", "bash")).toBe(true);
+		expect(needsApproval("manual", "web_fetch")).toBe(true);
+		expect(needsApproval("manual", "Task")).toBe(true);
+		expect(needsApproval("manual", "some-extension-tool")).toBe(true);
+	});
+
 	it("ExitPlanMode is never gated by approval", () => {
 		expect(needsApproval("auto-edits", "ExitPlanMode")).toBe(false);
 		expect(needsApproval("normal", "ExitPlanMode")).toBe(false);
 		expect(needsApproval("plan", "ExitPlanMode")).toBe(false);
+		expect(needsApproval("manual", "ExitPlanMode")).toBe(false);
 	});
 });

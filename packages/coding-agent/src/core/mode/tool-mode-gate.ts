@@ -61,6 +61,11 @@ export function needsApproval(mode: SessionMode, toolName: string): boolean {
 		case "auto-edits":
 			// Only bash prompts in auto-edits mode; edit/write/read auto-run.
 			return toolName === "bash";
+		case "manual":
+			// Manual mode: gate every tool that mutates state or runs commands.
+			// Pure-read tools (read/grep/find/ls) auto-run; everything else —
+			// edit, write, bash, web_fetch, Task, extension tools — prompts.
+			return toolName !== "read" && toolName !== "grep" && toolName !== "find" && toolName !== "ls";
 	}
 }
 

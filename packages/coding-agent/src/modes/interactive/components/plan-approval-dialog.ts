@@ -1,11 +1,18 @@
 /**
- * Dialog shown when the agent calls ExitPlanMode. Displays the proposed plan
- * (markdown) and asks the user to approve it (and choose the next mode) or
- * reject it with feedback.
+ * Dialog shown when the agent calls ExitPlanMode.
+ *
+ * Two render states:
+ * 1. "select" — user picks an outcome: approve into one of three modes, or
+ *    reject and tell the agent what to revise.
+ * 2. "feedback" — after picking reject, user types feedback that's sent back
+ *    to the model so it can revise the plan. Empty submit falls back to a
+ *    boilerplate rejection; Esc returns to the select state.
  */
 
 import {
+	type Component,
 	Container,
+	Input,
 	Markdown,
 	type SelectItem,
 	SelectList,
@@ -18,34 +25,77 @@ import { DynamicBorder } from "./dynamic-border.js";
 
 const LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 28,
-	maxPrimaryColumnWidth: 56,
+	maxPrimaryColumnWidth: 64,
 };
 
-type Choice = "approve-normal" | "approve-auto-edits" | "reject";
+type Choice = "approve-normal" | "approve-auto-edits" | "approve-manual" | "reject";
 
 const CHOICES: SelectItem[] = [
 	{
 		value: "approve-normal",
 		label: "Yes, proceed with no prompts",
-		description: "Switch to Normal mode (pi default — every tool runs automatically)",
+		description: "Switch to Normal mode (every tool runs automatically)",
 	},
 	{
 		value: "approve-auto-edits",
 		label: "Yes, but ask before bash",
-		description: "Switch to Auto-Accept Edits — edits/writes auto-run, bash prompts for approval",
+		description: "Switch to Auto-Accept Edits — edits/writes auto-run, bash prompts",
+	},
+	{
+		value: "approve-manual",
+		label: "Yes, manually approve every tool",
+		description: "Switch to Manual mode — every tool call asks for approval",
 	},
 	{
 		value: "reject",
 		label: "No, keep planning",
-		description: "Stay in plan mode and revise the plan",
+		description: "Stay in plan mode and tell the agent what to revise",
 	},
 ];
 
 export class PlanApprovalDialogComponent extends Container {
 	private selectList: SelectList;
 
-	constructor(request: PlanApprovalRequest, onResolve: (result: PlanApprovalResult) => void) {
+	constructor(
+		private readonly request: PlanApprovalRequest,
+		private readonly onResolve: (result: PlanApprovalResult) => void,
+		private readonly onFocusChange?: (focus: Component) => void,
+	) {
 		super();
+		this.selectList = this._buildSelectList();
+		this._renderSelectState();
+	}
+
+	/** Initial focus target — used by the host's showSelector(). */
+	getSelectList(): SelectList {
+		return this.selectList;
+	}
+
+	private _buildSelectList(): SelectList {
+		const list = new SelectList(CHOICES, CHOICES.length, getSelectListTheme(), LAYOUT);
+		list.onSelect = (item) => {
+			const value = item.value as Choice;
+			if (value === "approve-normal") {
+				this.onResolve({ outcome: "approve", nextMode: "normal" satisfies Exclude<SessionMode, "plan"> });
+			} else if (value === "approve-auto-edits") {
+				this.onResolve({ outcome: "approve", nextMode: "auto-edits" satisfies Exclude<SessionMode, "plan"> });
+			} else if (value === "approve-manual") {
+				this.onResolve({ outcome: "approve", nextMode: "manual" satisfies Exclude<SessionMode, "plan"> });
+			} else {
+				this._renderFeedbackState();
+			}
+		};
+		list.onCancel = () => {
+			this.onResolve({
+				outcome: "reject",
+				feedback: "User cancelled the approval prompt without choosing. Stay in plan mode.",
+			});
+		};
+		return list;
+	}
+
+	private _renderSelectState(): void {
+		this.clear();
 		this.addChild(new DynamicBorder());
 		this.addChild(new Text(theme.fg("accent", theme.bold("Ready to code?"))));
 		this.addChild(
@@ -56,33 +106,35 @@ export class PlanApprovalDialogComponent extends Container {
 				),
 			),
 		);
-		this.addChild(new Markdown(request.plan, 1, 0, getMarkdownTheme()));
-		this.selectList = new SelectList(CHOICES, CHOICES.length, getSelectListTheme(), LAYOUT);
-		this.selectList.onSelect = (item) => {
-			const value = item.value as Choice;
-			if (value === "approve-normal") {
-				onResolve({ outcome: "approve", nextMode: "normal" satisfies Exclude<SessionMode, "plan"> });
-			} else if (value === "approve-auto-edits") {
-				onResolve({ outcome: "approve", nextMode: "auto-edits" satisfies Exclude<SessionMode, "plan"> });
-			} else {
-				onResolve({
-					outcome: "reject",
-					feedback:
-						"User rejected the plan. Revise based on what you read and call ExitPlanMode again with an updated plan.",
-				});
-			}
-		};
-		this.selectList.onCancel = () => {
-			onResolve({
-				outcome: "reject",
-				feedback: "User cancelled the approval prompt without choosing. Stay in plan mode.",
-			});
-		};
+		this.addChild(new Markdown(this.request.plan, 1, 0, getMarkdownTheme()));
 		this.addChild(this.selectList);
 		this.addChild(new DynamicBorder());
+		this.onFocusChange?.(this.selectList);
 	}
 
-	getSelectList(): SelectList {
-		return this.selectList;
+	private _renderFeedbackState(): void {
+		this.clear();
+		this.addChild(new DynamicBorder());
+		this.addChild(new Text(theme.fg("warning", theme.bold("Tell the agent what to revise"))));
+		this.addChild(
+			new Text(theme.fg("dim", "Type feedback below and press Enter to send. Press Esc to go back to the choices.")),
+		);
+		const input = new Input();
+		input.onSubmit = (value: string) => {
+			const trimmed = value.trim();
+			this.onResolve({
+				outcome: "reject",
+				feedback:
+					trimmed.length > 0
+						? `User rejected the plan with feedback: ${trimmed}`
+						: "User rejected the plan without specific feedback. Re-read the request, identify what's likely off about the plan, and revise.",
+			});
+		};
+		input.onEscape = () => {
+			this._renderSelectState();
+		};
+		this.addChild(input);
+		this.addChild(new DynamicBorder());
+		this.onFocusChange?.(input);
 	}
 }

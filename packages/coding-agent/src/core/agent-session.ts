@@ -534,7 +534,10 @@ export class AgentSession {
 			const entry = entries[i];
 			if (entry.type === "custom" && entry.customType === MODE_CHANGE_CUSTOM_TYPE) {
 				const data = entry.data as ModeChangeData | undefined;
-				if (data && (data.mode === "normal" || data.mode === "auto-edits" || data.mode === "plan")) {
+				if (
+					data &&
+					(data.mode === "normal" || data.mode === "auto-edits" || data.mode === "manual" || data.mode === "plan")
+				) {
 					return data.mode;
 				}
 			}
@@ -1106,9 +1109,12 @@ export class AgentSession {
 			this._activeToolsBeforePlan = this.getActiveToolNames();
 		}
 
-		// Reset session-scoped allowlist when leaving auto-edits, since the gate is
-		// only meaningful in auto-edits today.
-		if (previous === "auto-edits" && mode !== "auto-edits") {
+		// Reset session-scoped allowlist when leaving a prompting mode for a
+		// non-prompting mode. Auto-edits ↔ manual transitions keep the
+		// allowlist (the user's "don't ask again for X" still applies).
+		const wasPrompting = previous === "auto-edits" || previous === "manual";
+		const isPrompting = mode === "auto-edits" || mode === "manual";
+		if (wasPrompting && !isPrompting) {
 			this._modeAllowedTools.clear();
 		}
 

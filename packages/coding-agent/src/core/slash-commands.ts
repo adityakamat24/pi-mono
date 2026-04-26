@@ -36,7 +36,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "kill", description: "Terminate a background job: /kill <id> [--force]" },
 	{ name: "memory", description: "List loaded memory files (~/.pi/memory and .pi/memory)" },
 	{ name: "plan", description: "Enter plan mode (research with read-only tools, then approve a plan)" },
-	{ name: "mode", description: "Set input mode: /mode normal | auto-edits | plan" },
+	{ name: "mode", description: "Set input mode: /mode normal | auto-edits | manual | plan" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },
 	{ name: "clone", description: "Duplicate the current session at the current position" },
 	{ name: "tree", description: "Navigate session tree (switch branches)" },
