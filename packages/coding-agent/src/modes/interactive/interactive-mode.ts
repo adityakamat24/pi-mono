@@ -5587,6 +5587,24 @@ export class InteractiveMode {
 		// Auto-emit a fresh bumper so the user sees the new cumulative state.
 		this._editsSinceLastSummary = false;
 		this._emitPrPaneBumper();
+
+		// Phase 3b: queue a follow-up note to the model so it knows the change
+		// was rolled back and can adjust on the next turn. Without this, the
+		// model would still believe its earlier edit applied.
+		try {
+			const newSnippet = newLinesForHunk.join("\n");
+			const oldSnippet = oldLinesForHunk.join("\n");
+			const truncate = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+			const note =
+				`I reverted hunk ${hunkIndex} of \`${targetRel}\` via /revert. ` +
+				`The lines you wrote there are no longer in the file — the original session-start content is back. ` +
+				`If your reasoning depended on that change, reconsider before making further edits. ` +
+				`Reverted addition (now removed):\n\`\`\`\n${truncate(newSnippet, 800)}\n\`\`\`\n` +
+				`Restored original (now in file):\n\`\`\`\n${truncate(oldSnippet, 800)}\n\`\`\``;
+			await this.session.followUp(note);
+		} catch {
+			// followUp can throw if the session is in an unexpected state — non-fatal.
+		}
 	}
 
 	private _buildCurrentSessionDiff() {
