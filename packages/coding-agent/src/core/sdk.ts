@@ -16,6 +16,7 @@ import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { isInstallTelemetryEnabled } from "./telemetry.js";
 import { time } from "./timings.js";
+import { ENTER_PLAN_MODE_TOOL_NAME } from "./tools/enter-plan-mode-name.js";
 import {
 	createBashTool,
 	createCodingTools,
@@ -26,9 +27,10 @@ import {
 	createReadOnlyTools,
 	createReadTool,
 	createWriteTool,
-	type ToolName,
 	withFileMutationQueue,
 } from "./tools/index.js";
+import { REMEMBER_TOOL_NAME } from "./tools/remember-name.js";
+import { TASK_TOOL_NAME } from "./tools/task.js";
 
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
@@ -253,7 +255,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = "off";
 	}
 
-	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];
+	// Default active tool list for an interactive session. Includes:
+	// - read/bash/edit/write — the original four built-ins.
+	// - EnterPlanMode — model can request plan mode (always registered).
+	// - Remember — model can persist memory across sessions (always registered).
+	// - Task — dispatch subagents. Only takes effect when subagent definitions
+	//   exist on disk; agent-session.ts._refreshToolRegistry registers Task
+	//   conditionally and setActiveToolsByName filters out names that aren't
+	//   in the registry, so listing it here is a no-op when subagents are
+	//   absent and a real exposure when they're present. This is the single
+	//   point where the SDK couples to "if subagents exist, give the model
+	//   access" without the SDK having to actually inspect the registry.
+	const defaultActiveToolNames: string[] = [
+		"read",
+		"bash",
+		"edit",
+		"write",
+		ENTER_PLAN_MODE_TOOL_NAME,
+		REMEMBER_TOOL_NAME,
+		TASK_TOOL_NAME,
+	];
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const initialActiveToolNames: string[] = options.tools
 		? [...options.tools]
