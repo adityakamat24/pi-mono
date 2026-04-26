@@ -257,20 +257,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Default active tool list for an interactive session. Includes:
 	// - read/bash/edit/write — the original four built-ins.
+	// - grep/find/ls — read-only navigation tools. Previously off-by-default
+	//   (per pi's --help text) but that wastes the model's time: in plan mode
+	//   the gate allows them but the model can't call them if they're not in
+	//   the active list, so it falls back to `bash ls` and gets denied.
+	//   Listing them by default keeps plan mode useful and also gives the
+	//   model first-class navigation outside plan mode.
 	// - EnterPlanMode — model can request plan mode (always registered).
 	// - Remember — model can persist memory across sessions (always registered).
 	// - Task — dispatch subagents. Only takes effect when subagent definitions
 	//   exist on disk; agent-session.ts._refreshToolRegistry registers Task
 	//   conditionally and setActiveToolsByName filters out names that aren't
 	//   in the registry, so listing it here is a no-op when subagents are
-	//   absent and a real exposure when they're present. This is the single
-	//   point where the SDK couples to "if subagents exist, give the model
-	//   access" without the SDK having to actually inspect the registry.
+	//   absent and a real exposure when they're present.
 	const defaultActiveToolNames: string[] = [
 		"read",
 		"bash",
 		"edit",
 		"write",
+		"grep",
+		"find",
+		"ls",
 		ENTER_PLAN_MODE_TOOL_NAME,
 		REMEMBER_TOOL_NAME,
 		TASK_TOOL_NAME,
