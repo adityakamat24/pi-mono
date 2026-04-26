@@ -76,7 +76,9 @@ function maxLineNumberWidth(file: FileDiff): number {
 
 function renderHunk(hunk: Hunk, lineNumWidth: number): string[] {
 	const lines: string[] = [];
-	lines.push(theme.fg("dim", `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`));
+	const tag = theme.fg("accent", `[hunk ${hunk.index}]`);
+	const range = theme.fg("dim", `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
+	lines.push(`${tag} ${range}`);
 
 	// Walk the hunk and group adjacent -/+ runs so we can do intra-line
 	// highlighting when a single removed line is followed by a single added
@@ -183,5 +185,13 @@ export class PrPaneComponent extends Container {
 			}
 			this.addChild(new Text(""));
 		}
+		this.addChild(
+			new Text(
+				theme.fg(
+					"dim",
+					"Tip: /revert <path> <hunkIndex> to undo a single hunk (rebuild the diff with /pr afterwards). /undo to roll back the most recent change.",
+				),
+			),
+		);
 	}
 }

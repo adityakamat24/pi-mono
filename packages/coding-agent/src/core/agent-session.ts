@@ -455,6 +455,15 @@ export class AgentSession {
 	}
 
 	/**
+	 * Snapshot the listed file paths' current contents as a new checkpoint, so
+	 * a subsequent mutation (e.g. PR-pane revert) can be undone via `/undo`.
+	 * Used outside of the auto edit/write pre-image flow.
+	 */
+	async createCheckpoint(reason: string, absPaths: string[]): Promise<CheckpointEntry | undefined> {
+		return this._getCheckpointManager().create(reason, absPaths);
+	}
+
+	/**
 	 * Per-prompt cost-budget enforcement. Called after each assistant message
 	 * settles. Soft-warns at 80% of budget, hard-aborts above 100%.
 	 *

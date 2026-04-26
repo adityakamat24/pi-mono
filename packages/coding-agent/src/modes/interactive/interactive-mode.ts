@@ -2663,6 +2663,12 @@ export class InteractiveMode {
 				this.handlePrCommand();
 				return;
 			}
+			if (text.startsWith("/revert")) {
+				this.editor.setText("");
+				const arg = text === "/revert" ? "" : text.slice(7).trim();
+				await this.handleRevertCommand(arg);
+				return;
+			}
 			if (text === "/jobs") {
 				this.editor.setText("");
 				this.handleJobsCommand();
@@ -5462,6 +5468,125 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new PrPaneComponent(diff));
 		this.ui.requestRender();
+	}
+
+	/**
+	 * `/revert <relPath> <hunkIndex>` — undo a single hunk. Looks up the hunk
+	 * via the freshly-rebuilt cumulative session diff, replaces that range in
+	 * the file with its session-start equivalent, and snapshots the prior
+	 * state into a new checkpoint so `/undo` can roll the revert back.
+	 *
+	 * The agent is NOT auto-told about the revert — the user can mention it
+	 * to the model in their next message. Phase 3b adds automatic feedback
+	 * injection if we want it.
+	 */
+	private async handleRevertCommand(arg: string): Promise<void> {
+		if (!arg) {
+			this.showStatus("Usage: /revert <relPath> <hunkIndex>. Run /pr first to see hunk indexes.");
+			return;
+		}
+		const parts = arg.split(/\s+/);
+		if (parts.length < 2) {
+			this.showStatus("Usage: /revert <relPath> <hunkIndex>. Run /pr first to see hunk indexes.");
+			return;
+		}
+		const targetRel = parts[0];
+		const hunkIndexStr = parts[1];
+		const hunkIndex = Number.parseInt(hunkIndexStr, 10);
+		if (!Number.isFinite(hunkIndex) || hunkIndex < 0) {
+			this.showStatus(`Invalid hunk index "${hunkIndexStr}".`);
+			return;
+		}
+
+		const diff = this._buildCurrentSessionDiff();
+		const file = diff.files.find((f) => f.relPath === targetRel);
+		if (!file) {
+			const available = diff.files
+				.filter((f) => f.status !== "skipped")
+				.map((f) => f.relPath)
+				.join(", ");
+			this.showStatus(
+				`No session changes for "${targetRel}". Available: ${available || "(none — nothing to revert)"}`,
+			);
+			return;
+		}
+		if (file.status === "skipped") {
+			this.showStatus(`"${targetRel}" was skipped (${file.skippedReason ?? "unknown"}); cannot revert.`);
+			return;
+		}
+		const hunk = file.hunks.find((h) => h.index === hunkIndex);
+		if (!hunk) {
+			this.showStatus(
+				`Hunk ${hunkIndex} not found in "${targetRel}". Valid indexes: ${file.hunks.map((h) => h.index).join(", ")}.`,
+			);
+			return;
+		}
+
+		// Snapshot the file's CURRENT state so /undo can roll the revert back.
+		try {
+			await this.session.createCheckpoint(`revert hunk ${hunkIndex} of ${targetRel}`, [file.absPath]);
+		} catch {
+			// Checkpoint failure is non-fatal — proceed with the revert but warn.
+			this.showWarning("Could not create a pre-revert checkpoint; /undo will not restore this change.");
+		}
+
+		// Re-read current + original content (rebuild the diff used the same
+		// data, but we re-read here to be paranoid about a concurrent edit
+		// landing between /pr and /revert).
+		let currentContent: string;
+		try {
+			currentContent = fs.readFileSync(file.absPath, "utf-8");
+		} catch (e) {
+			this.showError(`Could not read ${file.absPath}: ${e instanceof Error ? e.message : String(e)}`);
+			return;
+		}
+		// Original = recompute pre-image lazily from the same source the diff
+		// builder used. Cheapest path: take the diff's hunk data and reverse
+		// it. Or: rebuild the diff and use its internal pre-image. We choose
+		// the latter, but the diff API doesn't expose pre-images directly; so
+		// we reconstruct it from the snapshot manifest path. The most
+		// straightforward approach: walk the snapshots dir again with the
+		// same heuristic. To avoid duplicating that logic here, we use the
+		// hunk's old-side content reconstructed from the current state plus
+		// the structuredPatch by re-running the diff against the file we
+		// already have. But we don't have the original content cached…
+		//
+		// Simpler: re-derive the original by reapplying the *current* hunk
+		// in reverse via the lines field. We have hunk.lines which carries
+		// the kind+text of every removed/context/added line, with line
+		// numbers. Build the old-content slice from hunk.lines directly.
+		const oldLinesForHunk = hunk.lines.filter((l) => l.kind === "-" || l.kind === " ").map((l) => l.text);
+		const newLinesForHunk = hunk.lines.filter((l) => l.kind === "+" || l.kind === " ").map((l) => l.text);
+
+		// Splice oldLinesForHunk back into currentContent at the new-side range.
+		const currentSplit = currentContent.split("\n");
+		// Detect whether the file ends with a newline — preserve it on write.
+		const hadTrailingNewline = currentContent.endsWith("\n");
+		const trimmedCurrent = hadTrailingNewline ? currentSplit.slice(0, -1) : currentSplit;
+		const newStart0 = hunk.newStart - 1;
+		const newEnd0 = newStart0 + newLinesForHunk.length;
+		if (newStart0 < 0 || newEnd0 > trimmedCurrent.length) {
+			this.showWarning(
+				`Hunk range ${hunk.newStart},${newLinesForHunk.length} no longer matches the current file — has it changed since /pr? Run /pr again.`,
+			);
+			return;
+		}
+		const next = [...trimmedCurrent.slice(0, newStart0), ...oldLinesForHunk, ...trimmedCurrent.slice(newEnd0)];
+		const nextContent = hadTrailingNewline ? `${next.join("\n")}\n` : next.join("\n");
+
+		try {
+			fs.writeFileSync(file.absPath, nextContent, "utf-8");
+		} catch (e) {
+			this.showError(`Failed to write ${file.absPath}: ${e instanceof Error ? e.message : String(e)}`);
+			return;
+		}
+
+		this.showStatus(
+			`Reverted hunk ${hunkIndex} of ${theme.fg("toolTitle", targetRel)} (${oldLinesForHunk.length} line(s) restored, ${newLinesForHunk.length} line(s) removed). /undo to roll this revert back.`,
+		);
+		// Auto-emit a fresh bumper so the user sees the new cumulative state.
+		this._editsSinceLastSummary = false;
+		this._emitPrPaneBumper();
 	}
 
 	private _buildCurrentSessionDiff() {
