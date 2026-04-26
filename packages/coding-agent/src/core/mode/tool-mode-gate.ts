@@ -11,6 +11,7 @@
  */
 
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
+import { ENTER_PLAN_MODE_TOOL_NAME } from "../tools/enter-plan-mode-name.js";
 import { EXIT_PLAN_MODE_TOOL_NAME } from "../tools/exit-plan-mode-name.js";
 import type {
 	PlanApprovalRequest,
@@ -19,6 +20,9 @@ import type {
 	ToolApprovalRequest,
 	ToolApprovalResult,
 } from "./types.js";
+
+/** Tools that auto-run in plan mode. Other tools are denied at the gate. */
+const PLAN_MODE_READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
 
 export interface ModeGateContext {
 	/** Read the current mode at execution time (not capture time). */
@@ -29,6 +33,11 @@ export interface ModeGateContext {
 	requestPlanApproval(request: PlanApprovalRequest): Promise<PlanApprovalResult>;
 	/** Persist the approved plan as a custom message and switch the session mode. */
 	onPlanApproved(plan: string, nextMode: Exclude<SessionMode, "plan">): void;
+	/**
+	 * Switch the session into plan mode. Triggered by the `EnterPlanMode` tool
+	 * when the model decides (or is told) to plan a coding task.
+	 */
+	onEnterPlanMode(reason?: string): void;
 	/** Record a session-scoped allowlist hit so we don't ask again for this tool name. */
 	rememberAllow(toolName: string): void;
 	/** Has this tool name been allow-listed for the rest of this session? */
@@ -46,9 +55,9 @@ export interface ModeGateContext {
  * Pure, exported for unit tests.
  */
 export function needsApproval(mode: SessionMode, toolName: string): boolean {
-	if (toolName === EXIT_PLAN_MODE_TOOL_NAME) {
-		// ExitPlanMode has its own dedicated approval path (plan_approval_request).
-		// It does NOT go through the tool approval prompt.
+	if (toolName === EXIT_PLAN_MODE_TOOL_NAME || toolName === ENTER_PLAN_MODE_TOOL_NAME) {
+		// EnterPlanMode and ExitPlanMode have their own dedicated routing. They
+		// do NOT go through the tool approval prompt.
 		return false;
 	}
 	switch (mode) {
@@ -88,6 +97,41 @@ function denyResult(toolName: string, reason: string): AgentToolResult<unknown> 
 export function wrapToolWithModeGate<T extends AgentTool>(tool: T, ctx: ModeGateContext): T {
 	const original = tool.execute;
 	const wrapped: AgentTool["execute"] = async (toolCallId, params, signal, onUpdate) => {
+		// EnterPlanMode is intercepted here regardless of mode: when called, it
+		// flips the session into plan mode via onEnterPlanMode(). The original
+		// execute() (a no-op fallback) is never invoked — the host owns the
+		// side effect.
+		if (tool.name === ENTER_PLAN_MODE_TOOL_NAME) {
+			const reason =
+				typeof (params as { reason?: unknown })?.reason === "string"
+					? (params as { reason: string }).reason
+					: undefined;
+			const currentMode = ctx.getMode();
+			if (currentMode === "plan") {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: "Already in plan mode — call `ExitPlanMode` with a markdown plan when you're ready.",
+						},
+					],
+					details: { switched: false, reason },
+				};
+			}
+			ctx.onEnterPlanMode(reason);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text:
+							"Switched to plan mode. Only read-only tools (`read`, `grep`, `find`, `ls`) auto-run from now on. " +
+							"Research the task, then call `ExitPlanMode` exactly once with a numbered markdown plan for user approval.",
+					},
+				],
+				details: { switched: true, reason },
+			};
+		}
+
 		// ExitPlanMode is intercepted here regardless of mode: when called, it
 		// publishes the plan and awaits user approval. The original execute()
 		// is never invoked — the host owns the side effect (mode change,
@@ -123,6 +167,20 @@ export function wrapToolWithModeGate<T extends AgentTool>(tool: T, ctx: ModeGate
 		}
 
 		const mode = ctx.getMode();
+
+		// Plan-mode runtime enforcement: belt-and-suspenders for the case where
+		// EnterPlanMode flipped the mode mid-turn. The LLM's tool list for the
+		// current turn was locked in before the switch, so it may still try to
+		// call edit / write / bash. Deny those here. Tool registration also
+		// strips writes when the mode is plan at registry-build time, so this
+		// branch only fires on the same-turn-as-EnterPlanMode case.
+		if (mode === "plan" && !PLAN_MODE_READ_ONLY_TOOLS.has(tool.name)) {
+			return denyResult(
+				tool.name,
+				`\`${tool.name}\` is not allowed in plan mode. Use only read-only tools (read, grep, find, ls), then call ExitPlanMode with a markdown plan.`,
+			);
+		}
+
 		const askTools = ctx.getAskTools();
 		const askListedHit = askTools.has(tool.name);
 		const needsByMode = needsApproval(mode, tool.name);

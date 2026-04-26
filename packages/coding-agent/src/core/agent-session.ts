@@ -98,6 +98,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { BASH_SPAWN_TOOL_NAME, createBashSpawnToolDefinition } from "./tools/bash-spawn.js";
+import { createEnterPlanModeToolDefinition, ENTER_PLAN_MODE_TOOL_NAME } from "./tools/enter-plan-mode.js";
 import { createExitPlanModeToolDefinition, EXIT_PLAN_MODE_TOOL_NAME } from "./tools/exit-plan-mode.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { createTaskToolDefinition, TASK_TOOL_NAME } from "./tools/task.js";
@@ -1143,7 +1144,8 @@ export class AgentSession {
 	}
 
 	private _defaultActiveToolNames(): string[] {
-		return this._baseToolsOverride ? Object.keys(this._baseToolsOverride) : ["read", "bash", "edit", "write"];
+		if (this._baseToolsOverride) return Object.keys(this._baseToolsOverride);
+		return ["read", "bash", "edit", "write", ENTER_PLAN_MODE_TOOL_NAME];
 	}
 
 	/**
@@ -1215,6 +1217,9 @@ export class AgentSession {
 			onPlanApproved: (plan: string, nextMode: Exclude<SessionMode, "plan">): void => {
 				this._persistPlanApproved(plan, nextMode);
 				this._setMode(nextMode);
+			},
+			onEnterPlanMode: (_reason?: string): void => {
+				this._setMode("plan");
 			},
 			rememberAllow: (toolName: string): void => {
 				this._modeAllowedTools.add(toolName);
@@ -2678,6 +2683,15 @@ export class AgentSession {
 			this._baseToolDefinitions.delete(EXIT_PLAN_MODE_TOOL_NAME);
 		}
 
+		// EnterPlanMode is always registered so the model can switch into plan
+		// mode at any time when the user asks for a plan.
+		if (!this._baseToolDefinitions.has(ENTER_PLAN_MODE_TOOL_NAME)) {
+			this._baseToolDefinitions.set(
+				ENTER_PLAN_MODE_TOOL_NAME,
+				createEnterPlanModeToolDefinition() as ToolDefinition,
+			);
+		}
+
 		// Subagent `Task` tool: registered only when at least one agent definition
 		// is loaded from `~/.pi/agents/*.md` or `<cwd>/.pi/agents/*.md`. Keeps the
 		// tool list clean for users who haven't opted in.
@@ -2843,6 +2857,9 @@ export class AgentSession {
 		if (this._mode === "plan") {
 			this._baseToolDefinitions.set(EXIT_PLAN_MODE_TOOL_NAME, createExitPlanModeToolDefinition() as ToolDefinition);
 		}
+		// EnterPlanMode is always registered, regardless of mode, so the model
+		// can voluntarily switch into plan mode when the user asks.
+		this._baseToolDefinitions.set(ENTER_PLAN_MODE_TOOL_NAME, createEnterPlanModeToolDefinition() as ToolDefinition);
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -2869,7 +2886,7 @@ export class AgentSession {
 				? this._planModeActiveToolNamesFromBase()
 				: this._baseToolsOverride
 					? Object.keys(this._baseToolsOverride)
-					: ["read", "bash", "edit", "write"];
+					: ["read", "bash", "edit", "write", ENTER_PLAN_MODE_TOOL_NAME];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

@@ -150,4 +150,11 @@ describe("needsApproval gate predicate", () => {
 		expect(needsApproval("plan", "ExitPlanMode")).toBe(false);
 		expect(needsApproval("manual", "ExitPlanMode")).toBe(false);
 	});
+
+	it("EnterPlanMode is never gated by approval", () => {
+		expect(needsApproval("normal", "EnterPlanMode")).toBe(false);
+		expect(needsApproval("auto-edits", "EnterPlanMode")).toBe(false);
+		expect(needsApproval("manual", "EnterPlanMode")).toBe(false);
+		expect(needsApproval("plan", "EnterPlanMode")).toBe(false);
+	});
 });

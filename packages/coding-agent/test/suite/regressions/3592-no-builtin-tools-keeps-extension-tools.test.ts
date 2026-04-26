@@ -78,7 +78,19 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "bash_spawn", "dynamic_tool", "edit", "find", "grep", "ls", "read", "web_fetch", "write"]);
+		).toEqual([
+			"EnterPlanMode",
+			"bash",
+			"bash_spawn",
+			"dynamic_tool",
+			"edit",
+			"find",
+			"grep",
+			"ls",
+			"read",
+			"web_fetch",
+			"write",
+		]);
 		expect(session.getActiveToolNames()).toEqual(["dynamic_tool"]);
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- read:");
